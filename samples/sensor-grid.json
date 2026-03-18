@@ -1,0 +1,30 @@
+{
+  "grid_id": "encodia-north-7",
+  "timestamp": 1742256000,
+  "readings": [
+    [0, 0, 18, 42, 1013, 72],
+    [0, 1, 19, 45, 1013, 68],
+    [0, 2, 17, 51, 1014, 75],
+    [1, 0, 20, 38, 1012, 65],
+    [1, 1, 21, 40, 1012, 62],
+    [1, 2, 19, 44, 1013, 70],
+    [2, 0, 22, 35, 1011, 58],
+    [2, 1, 23, 33, 1011, 55],
+    [2, 2, 21, 39, 1012, 63]
+  ],
+  "columns": ["row", "col", "temp_c", "humidity_%", "pressure_hpa", "signal_%"],
+  "calibration": {
+    "temp_offset": -0.3,
+    "humidity_offset": 1.2,
+    "pressure_offset": 0.0
+  },
+  "alerts": [],
+  "status": {
+    "online": 9,
+    "offline": 0,
+    "battery_low": false,
+    "firmware": "2.4.1",
+    "last_maintenance": "2026-01-15T08:30:00Z",
+    "next_maintenance": "2026-07-15T08:30:00Z"
+  }
+}

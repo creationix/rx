@@ -1,0 +1,48 @@
+{
+  "title": "The Great Emoji Census of 2026 🗳️",
+  "surveyor": "Dr. Codepoint 👩‍🔬",
+  "families": [
+    {
+      "household": "The Smiths 👨‍👩‍👧‍👦",
+      "members": [
+        { "name": "Pat 👨‍🦰", "role": "parent", "mood": "😊", "hobby": "🎸" },
+        { "name": "Sam 👩‍🦱", "role": "parent", "mood": "😌", "hobby": "🎨" },
+        { "name": "Jo 👧", "role": "child", "mood": "😄", "hobby": "⚽" },
+        { "name": "Max 👶", "role": "child", "mood": "😴", "hobby": "🧸" }
+      ],
+      "pets": [
+        { "name": "Byte 🐕‍🦺", "type": "dog", "mood": "🥰" },
+        { "name": "Nibble 🐈‍⬛", "type": "cat", "mood": "😼" }
+      ],
+      "address": { "street": "42 Binary Lane", "city": "Encodia", "country": "🇨🇭" }
+    },
+    {
+      "household": "The Joneses 👩‍👩‍👧",
+      "members": [
+        { "name": "Alex 🧑‍💻", "role": "parent", "mood": "🤓", "hobby": "💻" },
+        { "name": "River 🧑‍🎨", "role": "parent", "mood": "🥳", "hobby": "🎭" },
+        { "name": "Pixel 👧🏽", "role": "child", "mood": "🤩", "hobby": "🎮" }
+      ],
+      "pets": [
+        { "name": "Cache 🦜", "type": "parrot", "mood": "😎" }
+      ],
+      "address": { "street": "128 Stack Ave", "city": "Encodia", "country": "🇨🇭" }
+    }
+  ],
+  "favorite_foods": {
+    "🍕": { "votes": 847, "verdict": "universal truth" },
+    "🌮": { "votes": 623, "verdict": "strong contender" },
+    "🍣": { "votes": 591, "verdict": "quiet favorite" },
+    "🥦": { "votes": 12, "verdict": "suspicious" },
+    "🧇": { "votes": 445, "verdict": "breakfast champion" }
+  },
+  "weather_log": [
+    { "day": "Mon", "icon": "☀️", "high": 24, "low": 16 },
+    { "day": "Tue", "icon": "⛅", "high": 22, "low": 15 },
+    { "day": "Wed", "icon": "🌧️", "high": 18, "low": 12 },
+    { "day": "Thu", "icon": "⛈️", "high": 15, "low": 10 },
+    { "day": "Fri", "icon": "🌈", "high": 20, "low": 14 },
+    { "day": "Sat", "icon": "☀️", "high": 26, "low": 18 },
+    { "day": "Sun", "icon": "☀️", "high": 28, "low": 20 }
+  ]
+}

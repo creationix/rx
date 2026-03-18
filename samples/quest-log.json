@@ -1,0 +1,68 @@
+{
+  "title": "The Legend of the Compressed Realm",
+  "version": 3,
+  "hero": {
+    "name": "Séraphine ✨",
+    "class": "Byte Mage",
+    "level": 42,
+    "hp": 256,
+    "mp": 128,
+    "stats": {
+      "strength": 14,
+      "dexterity": 18,
+      "intelligence": 30,
+      "wisdom": 25,
+      "charisma": 22
+    },
+    "equipment": {
+      "weapon": { "name": "Zigzag Encoder 🗡️", "damage": 64, "rarity": "legendary" },
+      "shield": { "name": "Prefix Guard 🛡️", "defense": 32, "rarity": "rare" },
+      "ring": { "name": "Ring of Deduplication 💍", "bonus": 8, "rarity": "legendary" }
+    },
+    "inventory": [
+      { "name": "Healing Potion 🧪", "quantity": 5, "rarity": "common" },
+      { "name": "Mana Crystal 💎", "quantity": 3, "rarity": "rare" },
+      { "name": "Scroll of Indexing 📜", "quantity": 1, "rarity": "legendary" },
+      { "name": "Stale Bread 🍞", "quantity": 12, "rarity": "common" }
+    ]
+  },
+  "quests": [
+    {
+      "id": 1,
+      "title": "The Null Pointer of Doom",
+      "status": "completed",
+      "reward": { "gold": 500, "xp": 1200 },
+      "giver": "Elder Malloc 🧙"
+    },
+    {
+      "id": 2,
+      "title": "Escape the Garbage Collector",
+      "status": "completed",
+      "reward": { "gold": 750, "xp": 2000 },
+      "giver": "Captain Refcount 🏴‍☠️"
+    },
+    {
+      "id": 3,
+      "title": "The Infinite Loop Labyrinth",
+      "status": "active",
+      "reward": { "gold": 1000, "xp": 3500 },
+      "giver": "Professor Halting 🎓"
+    },
+    {
+      "id": 4,
+      "title": "Defeat the Race Condition Dragon 🐉",
+      "status": "locked",
+      "reward": { "gold": 5000, "xp": 10000 },
+      "giver": "The Mutex Queen 👑"
+    }
+  ],
+  "world": {
+    "name": "Encodia",
+    "regions": {
+      "Buffer Plains": { "level_range": [1, 10], "danger": "low", "discovered": true },
+      "Pointer Forest": { "level_range": [10, 20], "danger": "medium", "discovered": true },
+      "Stack Overflow Mountains": { "level_range": [20, 35], "danger": "high", "discovered": true },
+      "The Heap 🌋": { "level_range": [35, 50], "danger": "extreme", "discovered": false }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "Encodia Developer Portal",
+  "short_name": "Encodia",
+  "description": "Documentation and tools for the realm of efficient encoding",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#1a1a2e",
+  "background_color": "#0f0f23",
+  "icons": [
+    { "src": "/icons/icon-72.png", "sizes": "72x72", "type": "image/png" },
+    { "src": "/icons/icon-96.png", "sizes": "96x96", "type": "image/png" },
+    { "src": "/icons/icon-128.png", "sizes": "128x128", "type": "image/png" },
+    { "src": "/icons/icon-144.png", "sizes": "144x144", "type": "image/png" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-384.png", "sizes": "384x384", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "routes": {
+    "/": { "title": "Home", "component": "LandingPage", "auth": false },
+    "/docs": { "title": "Documentation", "component": "DocsIndex", "auth": false },
+    "/docs/getting-started": { "title": "Getting Started", "component": "DocsPage", "auth": false },
+    "/docs/encoding": { "title": "Encoding Guide", "component": "DocsPage", "auth": false },
+    "/docs/api-reference": { "title": "API Reference", "component": "DocsPage", "auth": false },
+    "/docs/cli": { "title": "CLI Tool", "component": "DocsPage", "auth": false },
+    "/docs/faq": { "title": "FAQ", "component": "DocsPage", "auth": false },
+    "/playground": { "title": "Playground", "component": "Playground", "auth": false },
+    "/dashboard": { "title": "Dashboard", "component": "Dashboard", "auth": true },
+    "/dashboard/projects": { "title": "Projects", "component": "ProjectList", "auth": true },
+    "/dashboard/settings": { "title": "Settings", "component": "SettingsPage", "auth": true },
+    "/dashboard/usage": { "title": "Usage", "component": "UsagePage", "auth": true },
+    "/admin": { "title": "Admin", "component": "AdminPanel", "auth": true },
+    "/admin/users": { "title": "User Management", "component": "AdminUsers", "auth": true },
+    "/admin/logs": { "title": "System Logs", "component": "AdminLogs", "auth": true }
+  },
+  "nav": [
+    { "label": "Docs", "href": "/docs", "icon": "📖" },
+    { "label": "Playground", "href": "/playground", "icon": "🛝" },
+    { "label": "Dashboard", "href": "/dashboard", "icon": "📊" },
+    { "label": "GitHub", "href": "https://github.com/encodia/portal", "icon": "🐙", "external": true }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+	"name": "@creationix/rx",
+	"version": "0.7.1",
+	"description": "REXC encoder, decoder, and CLI data tool",
+	"keywords": [
+		"rexc",
+		"rx",
+		"encoder",
+		"decoder",
+		"streaming",
+		"data"
+	],
+	"type": "module",
+	"bin": {
+		"rx": "./dist/rx-cli.js"
+	},
+	"main": "./dist/rx.cjs",
+	"module": "./dist/rx.js",
+	"types": "./dist/rx.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/rx.d.ts",
+			"import": "./dist/rx.js",
+			"require": "./dist/rx.cjs"
+		}
+	},
+	"files": [
+		"README.md",
+		"LICENSE",
+		"dist"
+	],
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"build:clean": "rm -rf dist",
+		"build:esm": "bun build rx.ts rx-cli.ts --outdir dist --target node --format esm",
+		"build:cjs": "bun build rx.ts --target node --format cjs --outfile dist/rx.cjs",
+		"build:types": "tsc",
+		"build:shebang": "printf '#!/usr/bin/env node\\n' | cat - dist/rx-cli.js > dist/rx-cli.tmp && mv dist/rx-cli.tmp dist/rx-cli.js",
+		"build": "bun run build:clean && bun run build:esm && bun run build:cjs && bun run build:types && bun run build:shebang",
+		"prepublishOnly": "bun test && bun run build",
+		"test": "bun test"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/creationix/rex.git",
+		"directory": "packages/rx-format"
+	},
+	"homepage": "https://github.com/creationix/rex/tree/main/packages/rx-format#readme",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/bun": "latest",
+		"vitest": "^4.1.0"
+	}
+}

@@ -1,0 +1,14 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"emitDeclarationOnly": true,
+		"declaration": true,
+		"outDir": "dist",
+		"strict": true,
+		"skipLibCheck": true
+	},
+	"include": ["rx.ts"]
+}
