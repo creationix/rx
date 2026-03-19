@@ -88,7 +88,7 @@ The returned value is a **read-only Proxy**. It supports property access, `Objec
 For performance-critical paths, skip the string conversion:
 
 ```ts
-import { encode, decode, open } from "@creationix/rx";
+import { encode, open } from "@creationix/rx";
 
 const buf = encode({ path: "/api/users", status: 200 });
 const data = open(buf) as any;
