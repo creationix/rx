@@ -1,8 +1,8 @@
-# RX
+# RX Data Store
 
 [![rx tests](https://github.com/creationix/rx/actions/workflows/rx-test.yml/badge.svg)](https://github.com/creationix/rx/actions/workflows/rx-test.yml)
 
-RX is a read-only embedded store for JSON-shaped data. Encode once, then query the encoded document in place — no parsing, no object graph, no GC pressure. Think of it as no-SQL SQLite: unstructured data with database-style random access.
+RX is an embedded data store for JSON-shaped data. Encode once, then query the encoded document in place — no parsing, no object graph, no GC pressure. Think of it as no-SQL SQLite: unstructured data with database-style random access.
 
 ```json
 [ { "color": "red", "fruits": [ "apple", "cherry" ] },
