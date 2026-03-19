@@ -4,12 +4,16 @@
 
 RX is a read-only embedded store for JSON-shaped data. Encode once, then query the encoded document in place — no parsing, no object graph, no GC pressure. Think of it as no-SQL SQLite: unstructured data with database-style random access.
 
-```js
-JSON  {"name":"alice","scores":[10,20,30]}
-RX    +Y+E+k;6scores,6alice,5name,4:t
+```json
+[ { "color": "red", "fruits": [ "apple", "cherry" ] },
+  { "color": "yellow", "fruits": [ "apple", "banana" ] } ]
 ```
 
-Data stays queryable in this compact form — no parsing step, just direct reads from the encoded bytes. 
+When encoding as RX, pointers deduplicate automatically: `^z` reuses "apple", `^h` reuses the shared key layout. The encoded form is queryable as-is — no parsing step, just direct reads from the buffer.
+
+```rexc
+banana,6apple,5;ffruits,6yellow,6color,5:Echerry,6^z;ared,3^h:j;_
+```
 
 On a real 92 MB deployment manifest with 35,000 route keys:
 
