@@ -66,11 +66,12 @@ All fields are monomorphic numbers (except `data` and `tag`). This gives V8 a st
 
 ### Internal scratch cursors
 
-Three module-level cursors avoid allocations in internal functions:
+Four module-level cursors avoid allocations in internal functions:
 
 - `_k` — key/temp cursor (used by `findKey`, `read` for index/schema parsing)
 - `_s` — schema cursor (used by `findKey` for schema traversal)
 - `_cc` — collectChildren cursor (separate from `_k` to avoid conflict)
+- `_cmp` — comparison scratch cursor (used by `strCompare`, `strEquals`, `strHasPrefix`)
 
 Safe because JS is single-threaded and these functions don't re-enter each other on the same cursor.
 
@@ -247,7 +248,7 @@ For a single key lookup on a 35K-key indexed object: `open()` + one property acc
 
 - **String deduplication**: identical strings are written once; subsequent occurrences become `^` pointers.
 - **Shared schemas**: objects with identical key sets share a schema pointer — later objects store only values, referencing the first object's key layout.
-- **Path chains**: strings containing a `chainSplit` delimiter (default `"/"`) with shared prefixes are split into chain nodes, compressing URL paths and file paths.
+- **Path chains**: strings containing a `stringChainDelimiter` (default `"/"`) with shared prefixes are split into chain nodes, compressing URL paths and file paths.
 - **Sorted indexes**: when `indexes` is set, containers at or above the threshold get a sorted index table enabling O(log n) lookup.
 - **Exponent encoding**: integers with trailing zeroes (e.g. `1000000`) and all floats use `mantissa * 10^exponent` form.
 

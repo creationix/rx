@@ -21,7 +21,7 @@ On a real 92 MB deployment manifest with 35,000 route keys:
 |---|------|-----|
 | Size | 92 MB | 5.1 MB |
 | Look up one route | 69 ms (full parse) | 0.003 ms (direct read) |
-| Heap allocations | 2,598,384 | 1 |
+| Heap allocations | 2,598,384 | ~10 |
 
 ## When to use RX
 
