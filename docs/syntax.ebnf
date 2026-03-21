@@ -1,0 +1,102 @@
+(*
+  RX Format EBNF Grammar
+  =======================
+  RX is parsed RIGHT-TO-LEFT starting from the rightmost byte.
+  Every value has a tag character followed by a base64 varint,
+  and may have a body to the left of the tag.
+
+  Layout: [body][tag][b64 varint]
+                      <-- read this way
+*)
+
+value = number | string | ref
+      | map | list | pointer | chain ;
+
+(* ── Primitives ── *)
+
+(* Integer: +[zigzag varint]
+   Decimal: +[zigzag base]*[zigzag exponent] = base * 10^exp *)
+number = "+", varint, [ "*", varint ] ;
+
+(* Raw UTF-8 body with byte length *)
+string = utf8_body, ",", varint ;
+
+(* Built-in literal or external dictionary reference *)
+ref = "'", ref_name ;
+
+ref_name = builtin_ref | custom_ref ;
+
+builtin_ref = "t"                (* true *)
+            | "f"                (* false *)
+            | "n"                (* null *)
+            | "u"                (* undefined *)
+            | "inf"              (* +Infinity *)
+            | "nif"              (* -Infinity *)
+            | "nan"              (* NaN *)
+            ;
+
+custom_ref = b64, { b64 } ;
+
+(* ── Containers ── *)
+
+(*
+  Zero or more child values (similar to JSON array).
+  Children are written left-to-right but parsed right-to-left.
+  An optional index may appear between the last child and the tag.
+*)
+list = { value }, [ index ], ";", varint ;
+
+(*
+  Key/value pairs (similar to JSON object).
+  Written as key1, value1, key2, value2, ...
+  An optional schema and/or index may appear before the tag.
+  When both are present: ..., index, schema, ":", varint
+*)
+map = { value, value }, [ index ], [ schema ], ":", varint ;
+
+schema = pointer | ref ;
+
+(* ── Sharing and random access ── *)
+
+(* Backward byte delta to an earlier value *)
+pointer = "^", varint ;
+
+(* Concatenated string segments — typically strings and pointers *)
+chain = { value }, ".", varint ;
+
+(*
+  Sorted lookup table for O(1) list access or O(log n) map key lookup.
+  The compound varint packs: (count << 3) | (width - 1)
+  Each entry is a fixed-width b64 number giving a backward delta.
+*)
+index = { index_entry }, "#", varint ;
+
+index_entry = b64, { b64 } ;   (* fixed-width, determined by compound *)
+
+(* ── Base64 Varint ── *)
+
+(*
+  Unsigned integer as zero or more base64 digits, big-endian.
+  Zero is encoded as an empty string (zero digits).
+  Signed values use zigzag encoding on top.
+*)
+varint = { b64 } ;
+
+(*
+  URL-safe base64 alphabet used as integer digits.
+  Order extends hexadecimal: 0-9, a-z, A-Z, -, _
+*)
+b64 = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7"
+    | "8" | "9" | "a" | "b" | "c" | "d" | "e" | "f"
+    | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n"
+    | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v"
+    | "w" | "x" | "y" | "z" | "A" | "B" | "C" | "D"
+    | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L"
+    | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T"
+    | "U" | "V" | "W" | "X" | "Y" | "Z" | "-" | "_"
+    ;
+
+(* ── Body content ── *)
+
+(* Raw UTF-8 bytes — length determined by the varint after the comma tag *)
+utf8_body = { ? any UTF-8 byte ? } ;

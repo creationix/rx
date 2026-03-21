@@ -2,7 +2,7 @@
 
 This document is the formal grammar and encoding reference for the `.rx` text format used by `@creationix/rx`. It is intended to make the format understandable **without reading the source code**.
 
-RX covers the same data model as JSON: objects, arrays, strings, numbers, booleans, and `null`. Pointers, chains, refs, and indexes are encoding features that make large documents smaller and faster to query.
+RX covers the same data model as JSON: maps, lists, strings, numbers, booleans, and `null`. Pointers, chains, refs, and indexes are encoding features that make large documents smaller and faster to query.
 
 > For interactive inspection, paste any RX or JSON into the live viewer at **[rx.run](https://rx.run/)**.
 
@@ -29,162 +29,169 @@ The parser starts at the rightmost byte and scans left past base64 digits until 
 
 ## Grammar overview
 
-*Railroad diagram coming soon — top-level value production showing all branches.*
-
 A **value** is one of:
 
+```ebnf
+value = number | string | ref | list | map | pointer | chain ;
 ```
-value = integer | decimal | string | ref | object | array | pointer | chain
-```
 
-Each branch is described below with its tag and encoding layout.
-
-## Base64 varint
-
-*Railroad diagram coming soon — b64 digit alphabet.*
-
-RX uses the alphabet **`0-9 a-z A-Z - _`** (64 characters, URL-safe, no padding) for variable-length unsigned integers.
-
-- **Big-endian** digit order
-- **Zero** is an empty string (zero digits)
-- **Signed integers** use zigzag encoding: 0 → 0, -1 → 1, 1 → 2, -2 → 3, ...
-
-| Decimal | Zigzag | B64 digits | Written with `+` tag |
-|---------|--------|------------|----------------------|
-| 0 | 0 | *(empty)* | `+` |
-| 1 | 2 | `2` | `+2` |
-| -1 | 1 | `1` | `+1` |
-| 42 | 84 | `1k` | `+1k` |
-| 255 | 510 | `7-` | `+7-` |
-
----
-
-## Tags at a glance
+### Tags at a glance
 
 | Tag | Name | Layout | Description |
 |-----|------|--------|-------------|
-| **`+`** | Integer | `+[b64 zigzag]` | Zigzag-decoded signed integer |
-| **`*`** | Decimal | `[base node]*[b64 zigzag exponent]` | `base × 10^exp`; base is a full `+` node |
+| **`+`** | Number | `+[b64 zigzag]` | Zigzag-decoded signed integer |
+| **`*`** | Decimal | `[base]+[b64 base]*[b64 exp]` | `base × 10^exp` |
 | **`,`** | String | `[UTF-8 bytes],[b64 length]` | Raw UTF-8, length in bytes |
-| **`'`** | Ref | `'[name bytes]` | Built-in literal or external ref name |
-| **`:`** | Object | `[children]:[b64 content-size]` | Key/value pairs |
-| **`;`** | Array | `[children];[b64 content-size]` | Ordered child values |
+| **`'`** | Ref | `'[name]` | Built-in literal or external ref name |
+| **`;`** | List | `[children];[b64 content-size]` | Ordered child values |
+| **`:`** | Map | `[children]:[b64 content-size]` | Key/value pairs |
 | **`^`** | Pointer | `^[b64 delta]` | Backward delta to an earlier byte offset |
 | **`.`** | Chain | `[segments].[b64 content-size]` | Concatenated string segments |
 | **`#`** | Index | `[entries]#[b64 compound]` | Sorted lookup table for a container |
 
 ---
 
+## Building blocks
+
+### B64
+
+```ebnf
+b64
+  = "0" | "1" | "2" | "3" | "4" | "5" | "6"
+  | "7" | "8" | "9" | "a" | "b" | "c" | "d"
+  | "e" | "f" | "g" | "h" | "i" | "j" | "k"
+  | "l" | "m" | "n" | "o" | "p" | "q" | "r"
+  | "s" | "t" | "u" | "v" | "w" | "x" | "y"
+  | "z" | "A" | "B" | "C" | "D" | "E" | "F"
+  | "G" | "H" | "I" | "J" | "K" | "L" | "M"
+  | "N" | "O" | "P" | "Q" | "R" | "S" | "T"
+  | "U" | "V" | "W" | "X" | "Y" | "Z" | "-"
+  | "_"
+  ;
+```
+
+RX uses the alphabet **`0-9 a-z A-Z - _`** (64 characters, URL-safe, no padding) for variable-length unsigned integers.
+
+### Varint
+
+```ebnf
+varint = { b64 } ;
+```
+
+![varint railroad diagram](rr-varint.png)
+
+A `varint` is zero or more `b64` digits in big-endian order. These are used for unsigned integers, signed integers, and sometimes as string identifiers.
+
+- **Zero** is encoded as an empty string (zero digits)
+- **Signed integers** use zigzag encoding: 0 → 0, -1 → 1, 1 → 2, -2 → 3, ...
+
+| Decimal | Zigzag | B64 digits |
+|---------|--------|------------|
+| 0 | 0 | *(empty)* |
+| 1 | 2 | `2` |
+| -1 | 1 | `1` |
+| 42 | 84 | `1k` |
+| 255 | 510 | `7-` |
+
+---
+
 ## Primitives
 
-### Integer — `+`
+### Number — `+` `*`
 
-*Railroad diagram coming soon.*
-
-```text
-+[b64 zigzag-value]
+```ebnf
+number = "+" , varint , [ "*" , varint ] ;
 ```
 
-The varint is **zigzag-decoded** to produce a signed integer. Small integers with no trailing zeroes use this tag directly. Larger integers with trailing zeroes may be encoded as decimals.
+![Number Railroad Diagram](rr-number.png)
 
-| JSON | RX |
-|------|----|
-| `0` | `+` |
-| `1` | `+2` |
-| `-1` | `+1` |
-| `42` | `+1k` |
-
-### Decimal — `*`
-
-*Railroad diagram coming soon.*
-
-```text
-[+ base node]*[b64 zigzag-exponent]
-```
-
-Represents **`base × 10^exponent`**. The base is encoded as a full integer node (with its own `+` tag and zigzag varint). The exponent is zigzag-encoded as the `*` tag's own varint.
-
-The parser reads `*` and its b64 digits first (exponent), then recursively reads the node to the left (base).
-
-| JSON | RX | Base node | Exponent |
-|------|----|-----------|----------|
-| `3.14` | `+9Q*3` | `+9Q` → 314 | `*3` → -2 |
-| `1000000` | `+2*c` | `+2` → 1 | `*c` → 6 |
+Numbers are encoded as a zigzag signed integer base optionally combined with a zigzag signed power of 10 exponent. When the exponent is small and non-negative, the encoder folds it into the base and omits the `*` suffix.
 
 Special float values use refs instead: **`'inf`** (+Infinity), **`'nif`** (-Infinity), **`'nan`** (NaN).
 
+| JSON | RX | Base | Exp | Notes |
+|------|----|------|-----|-------|
+| `0` | `+` | 0 | — | zigzag(0) = empty |
+| `1` | `+2` | 1 | — | zigzag(1) = 2 |
+| `-1` | `+1` | -1 | — | zigzag(-1) = 1 |
+| `42` | `+1k` | 42 | — | zigzag(42) = 84 = `1k` |
+| `255` | `+7-` | 255 | — | zigzag(255) = 510 = `7-` |
+| `1000` | `+vg` | 1000 | — | small exp, folded into integer |
+| `3.14` | `+9Q*3` | 314 | -2 | 314 × 10⁻² |
+| `-0.5` | `+9*1` | -5 | -1 | -5 × 10⁻¹ |
+| `99.9` | `+ve*1` | 999 | -1 | 999 × 10⁻¹ |
+| `1000000` | `+2*c` | 1 | 6 | 1 × 10⁶ |
+
 ### String — `,`
 
-*Railroad diagram coming soon.*
-
-```text
-[UTF-8 bytes],[b64 byte-length]
+```ebnf
+string = utf8_body , "," , varint ;
 ```
+
+![string railroad diagram](rr-string.png)
 
 The body contains raw UTF-8 bytes. The varint gives the **byte length** (not character count). Strings may contain any bytes including nulls and non-ASCII unicode.
 
-| JSON | RX |
-|------|----|
-| `""` | `,` |
-| `"hi"` | `hi,2` |
-| `"alice"` | `alice,5` |
+| JSON | RX | Bytes | Notes |
+|------|----|-------|-------|
+| `""` | `,` | 0 | empty string |
+| `"hi"` | `hi,2` | 2 | |
+| `"alice"` | `alice,5` | 5 | |
+| `"hello world"` | `hello world,b` | 11 | b64(11) = `b` |
+| `"café"` | `café,5` | 5 | `é` is 2 UTF-8 bytes |
+| `"🎉"` | `🎉,4` | 4 | emoji is 4 UTF-8 bytes |
+| `"🏴‍☠️"` | `🏴‍☠️,d` | 13 | ZWJ pirate flag: 🏴 + ZWJ + ☠ + VS16 |
 
-### Ref / simple literal — `'`
+### Ref — `'`
 
-*Railroad diagram coming soon.*
-
-```text
-'[name bytes]
+```ebnf
+ref = "'" , ref_name ;
 ```
 
-Refs are **unique among tags**: the bytes after `'` are not a numeric value but a *name*. The parser reads them as the ref name and checks for built-in names first.
+![ref railroad diagram](rr-ref.png)
 
-**Built-in refs** encode JSON literals and special floats:
+Refs are **unique among tags**: the bytes after `'` are not a numeric value but a *name* composed of b64 digits. The parser checks for built-in names first; non-built-in ref names refer to entries in an external dictionary agreed between encoder and decoder.
 
-| Value | RX |
-|-------|----|
-| `true` | `'t` |
-| `false` | `'f` |
-| `null` | `'n` |
-| `undefined` | `'u` |
-| `+Infinity` | `'inf` |
-| `-Infinity` | `'nif` |
-| `NaN` | `'nan` |
-
-Non-built-in ref names refer to entries in an external dictionary agreed between encoder and decoder.
+| Value | RX | Name |
+|-------|----|------|
+| `true` | `'t` | `t` |
+| `false` | `'f` | `f` |
+| `null` | `'n` | `n` |
+| `undefined` | `'u` | `u` |
+| `+Infinity` | `'inf` | `inf` |
+| `-Infinity` | `'nif` | `nif` |
+| `NaN` | `'nan` | `nan` |
 
 ---
 
 ## Containers
 
-### Array — `;`
+### List — `;`
 
-*Railroad diagram coming soon.*
-
-```text
-[child_N]...[child_1];[b64 content-size]
+```ebnf
+list = { value } , [ index ] , ";" , varint ;
 ```
 
-Children are encoded in the body from left to right. The varint gives the **total byte size** of the content region. The parser computes the left edge as `tag_position - content_size` and iterates children right-to-left from the tag back to that edge.
+![list railroad diagram](rr-list.png)
 
-Large arrays may include an **index** (see below) between the last child and the `;` tag.
+Children are written in reverse order so that right-to-left parsing yields them in natural forward order (index 0 first). The varint gives the **total byte size** of the content region.
+
+Large lists may include an **index** between the last child and the `;` tag.
 
 | JSON | RX | Children (right-to-left parse order) |
 |------|----|--------------------------------------|
 | `[]` | `;` | *(none)* |
 | `[1,2,3]` | `+6+4+2;6` | `+2` → 3, `+4` → 2, `+6` → 1 |
 
-### Object — `:`
+### Map — `:`
 
-*Railroad diagram coming soon.*
-
-```text
-[value_N][key_N]...[value_1][key_1]:[b64 content-size]
+```ebnf
+map = { value , value } , [ index ] , [ schema ] , ":" , varint ;
 ```
 
-Keys and values alternate in the body: key₁, value₁, key₂, value₂, ... (in left-to-right byte order). **Key order is preserved.** Keys are typically strings but may be pointers or chains.
+Key/value pairs are written in reverse order so that right-to-left parsing yields them in natural insertion order. **Key order is preserved.** Keys are typically strings but may be pointers or chains.
 
-Large objects may include an **index** and/or a **schema** between the last key-value pair and the `:` tag. When present, the rightmost item is the schema, followed by the index.
+Large maps may include an **index** and/or a **schema** between the last key-value pair and the `:` tag. When both are present, the schema is rightmost, followed by the index.
 
 | JSON | RX |
 |------|----|
@@ -198,24 +205,20 @@ Large objects may include an **index** and/or a **schema** between the last key-
 
 ### Pointer — `^`
 
-*Railroad diagram coming soon.*
-
-```text
-^[b64 delta]
+```ebnf
+pointer = "^" , varint ;
 ```
 
 A pointer refers to an earlier value by **backward delta** — the distance in bytes from the pointer's tag position back to the target value's right edge. To resolve: `target = tag_position - delta`, then read the value at that offset.
 
 Pointers enable:
-- **Value deduplication** — identical strings, objects, or subtrees are written once
-- **Schema sharing** — objects with the same keys reference a shared key layout
+- **Value deduplication** — identical strings, maps, or subtrees are written once
+- **Schema sharing** — maps with the same keys reference a shared key layout
 
 ### Chain — `.`
 
-*Railroad diagram coming soon.*
-
-```text
-[segment_N]...[segment_1].[b64 content-size]
+```ebnf
+chain = { value } , "." , varint ;
 ```
 
 A chain is a **concatenated string** built from segments. Each segment is itself a value — typically a string, pointer, or another chain. The varint gives the total byte size of the segments.
@@ -224,13 +227,14 @@ Chains compress keys with shared prefixes. For example, `/docs/getting-started` 
 
 ### Index — `#`
 
-*Railroad diagram coming soon.*
-
-```text
-[fixed-width entries]#[b64 compound]
+```ebnf
+index = { index_entry } , "#" , varint ;
+index_entry = b64 , { b64 } ;
 ```
 
-An index is a **sorted lookup table** attached to a container (array or object). It appears inside the container body, between the content and the container's tag.
+![index railroad diagram](rr-index.png)
+
+An index is a **sorted lookup table** attached to a container (list or map). It appears inside the container body, between the content and the container's tag.
 
 The compound varint packs two values:
 
@@ -241,29 +245,31 @@ compound = (count << 3) | (width - 1)
 - **Low 3 bits** → `width - 1` (digits per entry, supporting widths 1–8)
 - **Upper bits** → `count` (number of entries)
 
-Each entry is a fixed-width base64 number giving the backward delta from the index position to the corresponding child. For objects, entries point to keys and are **sorted in UTF-8 byte order**.
+Each entry is a fixed-width base64 number giving the backward delta from the index position to the corresponding child. For maps, entries point to keys and are **sorted in UTF-8 byte order**.
 
 **Indexes enable:**
-- **O(1) array access** — jump directly to the *N*th element
-- **O(log n) object key lookup** — binary search on sorted keys
+- **O(1) list access** — jump directly to the *N*th element
+- **O(log n) map key lookup** — binary search on sorted keys
 - **O(log n + m) prefix search** — find the first matching key, then scan forward
 
-Without an index, array access and key lookup are O(n) linear scans.
+Without an index, list access and key lookup are O(n) linear scans.
 
----
+### Schema
 
-## Schemas
+Maps can store their keys **separately from their values** using a schema reference. This is useful when many maps share the same key set (e.g., rows in a table-like structure).
 
-Objects can store their keys **separately from their values** using a schema reference. This is useful when many objects share the same key set (e.g., rows in a table-like structure).
+```ebnf
+schema = pointer | ref ;
+```
 
-A schema object stores only values in its content body. The schema node appears as the rightmost item inside the object (before any index). The parser identifies it by tag:
+A schema map stores only values in its content body. The schema node appears as the rightmost item inside the map (before any index). The parser identifies it by tag:
 
-- **Pointer schema** (`^`) — points to another object or array whose keys become this object's keys
+- **Pointer schema** (`^`) — points to another map or list whose keys become this map's keys
 - **Ref schema** (`'`) — names an external dictionary entry containing the key list
 
-The encoder detects shared key sets **automatically**. The first object with a given key set is encoded normally; subsequent objects with the same keys store only their values and a pointer back to the first object's key layout.
+The encoder detects shared key sets **automatically**. The first map with a given key set is encoded normally; subsequent maps with the same keys store only their values and a pointer back to the first map's key layout.
 
-## External refs
+### External refs
 
 Encoders and decoders can share an **external dictionary** of values. When a value matches a ref entry by identity, the encoder writes `'name` instead of the full value. The decoder looks up the name in the same dictionary to reconstruct the original value.
 
@@ -281,7 +287,7 @@ Given this JSON:
 
 The RX encoding is:
 
-```rexc
+```
 +6version,7bob,3alice,5;cusers,5:w
 ```
 
@@ -289,13 +295,13 @@ Reading **right-to-left**:
 
 | Step | Bytes | Tag | B64 | Decoded |
 |------|-------|-----|-----|---------|
-| 1 | `:w` | `:` object | `w` = 32 | content is 32 bytes to the left |
+| 1 | `:w` | `:` map | `w` = 32 | content is 32 bytes to the left |
 | 2 | `users,5` | `,` string | `5` = 5 | "users" — key₁ |
-| 3 | `;c` | `;` array | `c` = 12 | content is 12 bytes — value₁ |
-| 4 | `alice,5` | `,` string | `5` = 5 | "alice" — array element₁ |
-| 5 | `bob,3` | `,` string | `3` = 3 | "bob" — array element₂ |
+| 3 | `;c` | `;` list | `c` = 12 | content is 12 bytes — value₁ |
+| 4 | `alice,5` | `,` string | `5` = 5 | "alice" — list element₁ |
+| 5 | `bob,3` | `,` string | `3` = 3 | "bob" — list element₂ |
 | 6 | `version,7` | `,` string | `7` = 7 | "version" — key₂ |
-| 7 | `+6` | `+` integer | `6` | zigzag 6 → **3** — value₂ |
+| 7 | `+6` | `+` number | `6` | zigzag 6 → **3** — value₂ |
 
 ---
 
