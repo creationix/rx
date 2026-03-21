@@ -78,8 +78,6 @@ RX uses the alphabet **`0-9 a-z A-Z - _`** (64 characters, URL-safe, no padding)
 varint = { b64 } ;
 ```
 
-![varint railroad diagram](rr-varint.png)
-
 A `varint` is zero or more `b64` digits in big-endian order. These are used for unsigned integers, signed integers, and sometimes as string identifiers.
 
 - **Zero** is encoded as an empty string (zero digits)
@@ -102,8 +100,6 @@ A `varint` is zero or more `b64` digits in big-endian order. These are used for 
 ```ebnf
 number = "+" , varint , [ "*" , varint ] ;
 ```
-
-![Number Railroad Diagram](rr-number.png)
 
 Numbers are encoded as a zigzag signed integer base optionally combined with a zigzag signed power of 10 exponent. When the exponent is small and non-negative, the encoder folds it into the base and omits the `*` suffix.
 
@@ -128,8 +124,6 @@ Special float values use refs instead: **`'inf`** (+Infinity), **`'nif`** (-Infi
 string = utf8_body , "," , varint ;
 ```
 
-![string railroad diagram](rr-string.png)
-
 The body contains raw UTF-8 bytes. The varint gives the **byte length** (not character count). Strings may contain any bytes including nulls and non-ASCII unicode.
 
 | JSON            | RX              | Bytes | Notes                                |
@@ -148,19 +142,17 @@ The body contains raw UTF-8 bytes. The varint gives the **byte length** (not cha
 ref = "'" , ref_name ;
 ```
 
-![ref railroad diagram](rr-ref.png)
-
 Refs are **unique among tags**: the bytes to the right of `'` are not a numeric value but a *name* composed of b64 digits. The parser checks for built-in names first; non-built-in ref names refer to entries in an external dictionary agreed between encoder and decoder.
 
-| Value       | RX     | Name  |
-|-------------|--------|-------|
-| `true`      | `'t`   | `t`   |
-| `false`     | `'f`   | `f`   |
-| `null`      | `'n`   | `n`   |
-| `undefined` | `'u`   | `u`   |
-| `+Infinity` | `'inf` | `inf` |
-| `-Infinity` | `'nif` | `nif` |
-| `NaN`       | `'nan` | `nan` |
+| Value       | RX     |
+|-------------|--------|
+| `true`      | `'t`   |
+| `false`     | `'f`   |
+| `null`      | `'n`   |
+| `undefined` | `'u`   |
+| `+Infinity` | `'inf` |
+| `-Infinity` | `'nif` |
+| `NaN`       | `'nan` |
 
 ---
 
@@ -172,16 +164,25 @@ Refs are **unique among tags**: the bytes to the right of `'` are not a numeric 
 list = { value } , [ index ] , ";" , varint ;
 ```
 
-![list railroad diagram](rr-list.png)
-
 Children are written in reverse order so that right-to-left parsing yields them in natural forward order (index 0 first). The varint gives the **total byte size** of the content region.
 
 Large lists may include an **index** between the last child and the `;` tag.
 
-| JSON      | RX         | Children (right-to-left parse order) |
-|-----------|------------|--------------------------------------|
-| `[]`      | `;`        | *(none)*                             |
-| `[1,2,3]` | `+6+4+2;6` | `+2` → 3, `+4` → 2, `+6` → 1         |
+Consider a small array containing 3 integers:
+
+```json
+[ 1, 2, 3 ]
+```
+
+When encoded to RX, this looks like:
+
+```rx
++6+4+2;6
+├╯├╯├╯╰┴─ header for 6 byte list
+│ │ ╰──── value 1 as zigzag integer
+│ ╰────── value 2 as zigzag integer
+╰──────── value 3 as zigzag integer
+```
 
 ### Map — `:`
 
@@ -231,8 +232,6 @@ Chains compress keys with shared prefixes. For example, `/docs/getting-started` 
 index = { index_entry } , "#" , varint ;
 index_entry = b64 , { b64 } ;
 ```
-
-![index railroad diagram](rr-index.png)
 
 An index is a lookup table attached to a container (list or map). It appears inside the container body, between the content and the container's tag.
 
