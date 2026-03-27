@@ -4,6 +4,10 @@ import {
 	tune,
 	INDEX_THRESHOLD, STRING_CHAIN_THRESHOLD, STRING_CHAIN_DELIMITER, DEDUP_COMPLEXITY_LIMIT
 } from "./rx.ts";
+import {
+	open as rxbOpen, encode as rxbEncode,
+	makeCursor as rxbMakeCursor, read as rxbRead,
+} from "./rxb.ts";
 import { readdirSync } from "node:fs";
 import { readFile, writeFile, mkdir, unlink, lstat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -58,8 +62,8 @@ function applyTheme(color: boolean) {
 
 // ── Types & arg parsing ──────────────────────────────────────
 
-type Format = "json" | "rexc";
-type OutputFormat = "json" | "rexc" | "tree" | "ast" | "other";
+type Format = "json" | "rexc" | "rxb";
+type OutputFormat = "json" | "rexc" | "rxb" | "tree" | "ast" | "other";
 
 type RxOptions = {
 	files: string[];
@@ -90,11 +94,12 @@ function parseArgs(argv: string[]): RxOptions {
 		if (arg === "-w" || arg === "--write") { opts.write = true; continue; }
 		if (arg === "-j" || arg === "--json") { opts.toFormat = "json"; continue; }
 		if (arg === "-r" || arg === "--rexc") { opts.toFormat = "rexc"; continue; }
+		if (arg === "-b" || arg === "--rxb") { opts.toFormat = "rxb"; continue; }
 		if (arg === "-t" || arg === "--tree") { opts.toFormat = "tree"; continue; }
 		if (arg === "-a" || arg === "--ast") { opts.toFormat = "ast"; continue; }
 		if (arg === "--to") {
 			const v = argv[++i];
-			if (v !== "json" && v !== "rexc" && v !== "tree" && v !== "ast") throw new Error("--to must be 'json', 'rexc', 'tree', or 'ast'");
+			if (v !== "json" && v !== "rexc" && v !== "rxb" && v !== "tree" && v !== "ast") throw new Error("--to must be 'json', 'rexc', 'rxb', 'tree', or 'ast'");
 			opts.toFormat = v;
 			continue;
 		}
@@ -161,6 +166,7 @@ function usage(): string {
 		`  ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}Pretty-print as a tree${tR}`,
 		`  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tCmd}-j${tR}                      ${tDesc}Convert to JSON${tR}`,
 		`  ${tCmd}rx${tR} ${tArg}data.json${tR} ${tCmd}-r${tR}                    ${tDesc}Convert to REXC${tR}`,
+		`  ${tCmd}rx${tR} ${tArg}data.json${tR} ${tCmd}-b${tR}                    ${tDesc}Convert to RXB (binary)${tR}`,
 		`  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}                   ${tDesc}Read from stdin (auto-detect)${tR}`,
 		`  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tCmd}-s${tR} ${tArg}key 0 sub${tR}            ${tDesc}Select a sub-value${tR}`,
 		"",
@@ -172,6 +178,7 @@ function usage(): string {
 		`${tH2}Format:${tR}`,
 		`  ${tCmd}-j${tR}, ${tCmd}--json${tR}                         ${tDesc}Output as JSON${tR}`,
 		`  ${tCmd}-r${tR}, ${tCmd}--rexc${tR}                         ${tDesc}Output as REXC${tR}`,
+		`  ${tCmd}-b${tR}, ${tCmd}--rxb${tR}                          ${tDesc}Output as RXB (binary)${tR}`,
 		`  ${tCmd}-t${tR}, ${tCmd}--tree${tR}                         ${tDesc}Output as tree (default on TTY)${tR}`,
 		`  ${tCmd}-a${tR}, ${tCmd}--ast${tR}                          ${tDesc}Output encoding structure as JSON${tR}`,
 		"",
@@ -204,6 +211,7 @@ function usage(): string {
 function formatFromExt(path: string): Format | undefined {
 	if (path.endsWith(".json")) return "json";
 	if (path.endsWith(".rexc") || path.endsWith(".rx")) return "rexc";
+	if (path.endsWith(".rxb")) return "rxb";
 	return undefined;
 }
 
@@ -226,7 +234,7 @@ async function readStdin(): Promise<string> {
 	return Buffer.concat(chunks).toString("utf8");
 }
 
-type ParsedInput = { value: unknown; rexcBytes?: Uint8Array };
+type ParsedInput = { value: unknown; rexcBytes?: Uint8Array; rxbBytes?: Uint8Array };
 
 function stripJsonComments(s: string): string {
 	let out = "", i = 0;
@@ -249,6 +257,14 @@ function stripJsonComments(s: string): string {
 	return out;
 }
 
+function parseRawBytes(bytes: Uint8Array, format: Format): ParsedInput {
+	if (format === "rxb") return { value: rxbOpen(bytes), rxbBytes: bytes };
+	const raw = new TextDecoder().decode(bytes);
+	if (format === "json") return { value: JSON.parse(stripJsonComments(raw)) };
+	const trimmed = new TextEncoder().encode(raw.trim());
+	return { value: open(trimmed), rexcBytes: trimmed };
+}
+
 function parseRaw(raw: string, format: Format): ParsedInput {
 	if (format === "json") return { value: JSON.parse(stripJsonComments(raw)) };
 	const bytes = new TextEncoder().encode(raw.trim());
@@ -256,8 +272,13 @@ function parseRaw(raw: string, format: Format): ParsedInput {
 }
 
 async function readOne(file: string): Promise<ParsedInput> {
+	const ext = file === "-" ? undefined : formatFromExt(file);
+	if (ext === "rxb") {
+		const bytes = new Uint8Array(await readFile(file));
+		return parseRawBytes(bytes, "rxb");
+	}
 	const raw = file === "-" ? await readStdin() : await readFile(file, "utf8");
-	const format = file === "-" ? detectFormat(raw) : formatFromExt(file) ?? detectFormat(raw);
+	const format = file === "-" ? detectFormat(raw) : ext ?? detectFormat(raw);
 	return parseRaw(raw, format);
 }
 
@@ -267,10 +288,11 @@ async function readInput(opts: RxOptions): Promise<ParsedInput> {
 			process.stderr.write([
 				`${tH1}rx${tR} — inspect, convert, and filter REXC & JSON data.`,
 				"",
-				`${tH2}Usage:${tR} (file can be .json or .rx)`,
+				`${tH2}Usage:${tR} (file can be .json, .rx, or .rxb)`,
 				`  ${tCmd}rx${tR} ${tArg}<file>${tR}                Pretty-print as a tree`,
 				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-j${tR}             Convert to JSON`,
 				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-r${tR}             Convert to REXC`,
+				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-b${tR}             Convert to RXB (binary)`,
 				`  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}         Read from stdin`,
 				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-s${tR} ${tArg}key 0 sub${tR}   Select a sub-value`,
 				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-o${tR} ${tArg}out.json${tR}    Write to file`,
@@ -484,6 +506,11 @@ function normalizeForJson(value: unknown, inArray: boolean): unknown {
 	return out;
 }
 
+function formatOutputBinary(value: unknown, format: OutputFormat): Uint8Array | null {
+	if (format === "rxb") return rxbEncode(value);
+	return null;
+}
+
 function formatOutput(value: unknown, format: OutputFormat, color: boolean, rexcBytes?: Uint8Array): string {
 	if (format === "tree") {
 		const text = treeStringify(value);
@@ -509,10 +536,10 @@ function formatOutput(value: unknown, format: OutputFormat, color: boolean, rexc
 // ── Shell completions ────────────────────────────────────────
 
 const FLAGS_WITH_VALUE = new Set(["-o", "--out", "--to", "--index-threshold", "--string-chain-threshold", "--string-chain-delimiter", "--dedup-complexity-limit"]);
-const ALL_FLAGS = ["-h", "--help", "-w", "--write", "-j", "--json", "-r", "--rexc", "-t", "--tree", "-a", "--ast",
+const ALL_FLAGS = ["-h", "--help", "-w", "--write", "-j", "--json", "-r", "--rexc", "-b", "--rxb", "-t", "--tree", "-a", "--ast",
 	"--to", "-s", "--select", "-o", "--out", "-c", "--color", "--no-color",
 	"--index-threshold", "--string-chain-threshold", "--string-chain-delimiter", "--dedup-complexity-limit"];
-const DATA_EXTENSIONS = [".json", ".rexc", ".rx"];
+const DATA_EXTENSIONS = [".json", ".rexc", ".rx", ".rxb"];
 
 function findSelectIndex(words: string[]): number {
 	for (let i = 0; i < words.length - 1; i++) {
@@ -665,7 +692,7 @@ async function handleCompletions(argv: string[]) {
 	const current = words[words.length - 1]!;
 	const prev = words.length >= 2 ? words[words.length - 2] : undefined;
 
-	if (prev === "--to") return printCompletions(["json", "rexc", "tree", "ast"]);
+	if (prev === "--to") return printCompletions(["json", "rexc", "rxb", "tree", "ast"]);
 	if (prev === "-o" || prev === "--out") return printCompletions(listFiles(current, false));
 
 	const selectIdx = findSelectIndex(words);
@@ -788,33 +815,54 @@ async function main() {
 		dedupComplexityLimit: opts.dedupComplexityLimit,
 	});
 
-	const { value: parsed, rexcBytes } = await readInput(opts);
+	const { value: parsed, rexcBytes, rxbBytes } = await readInput(opts);
+	const inputIsRx = !!(rexcBytes || rxbBytes);
 
 	if (opts.write) {
 		if (opts.files.length !== 1) throw new Error("--write requires exactly one input file");
 		const file = opts.files[0]!;
 		const ext = extname(file);
-		let outPath: string;
-		let outFormat: "json" | "rexc";
-		if (ext === ".json") {
-			outPath = file.slice(0, -ext.length) + ".rx";
-			outFormat = "rexc";
-		} else if (ext === ".rx" || ext === ".rexc") {
-			outPath = file.slice(0, -ext.length) + ".json";
-			outFormat = "json";
-		} else {
-			throw new Error(`--write: unsupported extension '${ext}' (expected .json, .rx, or .rexc)`);
-		}
 		const value = opts.select ? applySelector(parsed, opts.select) : parsed;
-		const out = formatOutput(value, outFormat, false, rexcBytes);
-		await writeFile(outPath, out + "\n", "utf8");
+		let outPath: string;
+		let outFormat: OutputFormat;
+		if (ext === ".json") {
+			// Default: json → rx. With -b flag: json → rxb.
+			outFormat = opts.toFormat === "rxb" ? "rxb" : "rexc";
+			outPath = file.slice(0, -ext.length) + (outFormat === "rxb" ? ".rxb" : ".rx");
+		} else if (ext === ".rx" || ext === ".rexc") {
+			outFormat = opts.toFormat === "rxb" ? "rxb" : "json";
+			outPath = file.slice(0, -ext.length) + (outFormat === "rxb" ? ".rxb" : ".json");
+		} else if (ext === ".rxb") {
+			outFormat = opts.toFormat === "rexc" ? "rexc" : "json";
+			outPath = file.slice(0, -ext.length) + (outFormat === "rexc" ? ".rx" : ".json");
+		} else {
+			throw new Error(`--write: unsupported extension '${ext}' (expected .json, .rx, .rexc, or .rxb)`);
+		}
+		const bin = formatOutputBinary(value, outFormat);
+		if (bin) {
+			await writeFile(outPath, bin);
+		} else {
+			const out = formatOutput(value, outFormat, false, rexcBytes);
+			await writeFile(outPath, out + "\n", "utf8");
+		}
 		return;
 	}
 
 	const toFormat: OutputFormat = opts.toFormat === "other"
-		? (rexcBytes ? "json" : "rexc")
-		: opts.toFormat ?? (process.stdout.isTTY ? "tree" : (rexcBytes ? "json" : "rexc"));
+		? (inputIsRx ? "json" : "rexc")
+		: opts.toFormat ?? (process.stdout.isTTY ? "tree" : (inputIsRx ? "json" : "rexc"));
 	const value = opts.select ? applySelector(parsed, opts.select) : parsed;
+
+	// Binary output (rxb)
+	const bin = formatOutputBinary(value, toFormat);
+	if (bin) {
+		if (opts.out) {
+			await writeFile(opts.out, bin);
+		} else {
+			process.stdout.write(bin);
+		}
+		return;
+	}
 
 	// Stream tree to stdout line-by-line
 	if (toFormat === "tree" && !opts.out) {
