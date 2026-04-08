@@ -285,29 +285,31 @@ Encoded size and encoding speed for JSON vs RX vs RXB across a range of datasets
 
 ### Encoded size
 
-| Dataset                     |      JSON |       RX |      RXB | RXB vs JSON | RXB vs RX |
-|-----------------------------|----------:|---------:|---------:|------------:|----------:|
-| flat-1k (mixed keys/values) |   42.1 KB |  40.4 KB |  31.2 KB |    **-26%** |  **-23%** |
-| flat-10k                    |  433.5 KB | 426.8 KB | 326.1 KB |    **-25%** |  **-24%** |
-| records-1k (table-like)     |  151.5 KB |  58.1 KB |  50.8 KB |    **-66%** |      -13% |
-| records-10k                 |  1,544 KB |   620 KB |   555 KB |    **-64%** |      -11% |
-| deep-6x4 (nested objects)   |  101.3 KB |  60.4 KB |  50.8 KB |    **-50%** |  **-16%** |
-| paths-5k (URL-like keys)    |  407.7 KB | 417.4 KB | 368.9 KB |        -10% |      -12% |
-| large-sample (93 MB JSON)   | 93,917 KB | 8,894 KB | 7,007 KB |    **-93%** |  **-21%** |
+| Dataset                      |       JSON |       RX |      RXB | RXB vs JSON | RXB vs RX |
+|------------------------------|-----------:|---------:|---------:|------------:|----------:|
+| flat-1k (mixed keys/values)  |    42.1 KB |  40.4 KB |  31.2 KB |    **-26%** |  **-23%** |
+| flat-10k                     |   433.5 KB | 426.8 KB | 326.1 KB |    **-25%** |  **-24%** |
+| records-1k (table-like)      |   151.5 KB |  58.2 KB |  50.8 KB |    **-66%** |      -13% |
+| records-10k                  |  1,544 KB  |  620 KB  |  555 KB  |    **-64%** |      -11% |
+| deep-6x4 (nested objects)    |   101.3 KB |  60.4 KB |  50.8 KB |    **-50%** |  **-16%** |
+| paths-5k (URL-like keys)     |   407.7 KB | 417.4 KB | 368.9 KB |        -10% |      -12% |
+| large-sample (94 MB JSON)    | 93,917 KB  | 8,894 KB | 7,007 KB |    **-93%** |  **-21%** |
+| large-sample-2 (114 MB JSON) | 114,382 KB | 7,259 KB | 6,215 KB |    **-95%** |  **-14%** |
 
 RX's biggest wins come from schema sharing and dedup (records, large-sample). RXB adds further savings from binary varints, b64str packing (keys like `d5-b2`), and hexstr packing.
 
 ### Encoding speed
 
-| Dataset      | JSON.stringify | RX encode | RXB encode |
-|--------------|---------------:|----------:|-----------:|
-| flat-1k      |        0.03 ms |   0.53 ms |    0.56 ms |
-| flat-10k     |        0.18 ms |    5.7 ms |     6.3 ms |
-| records-1k   |        0.14 ms |    1.3 ms |     1.3 ms |
-| records-10k  |         1.4 ms |   15.2 ms |    16.3 ms |
-| deep-6x4     |        0.08 ms |   0.63 ms |    0.71 ms |
-| paths-5k     |        0.06 ms |    4.4 ms |     4.7 ms |
-| large-sample |          29 ms |    370 ms |     385 ms |
+| Dataset        | JSON.stringify | RX encode | RXB encode |
+|----------------|---------------:|----------:|-----------:|
+| flat-1k        |        0.03 ms |   0.49 ms |    0.58 ms |
+| flat-10k       |        0.18 ms |    5.7 ms |     6.4 ms |
+| records-1k     |        0.14 ms |    1.4 ms |     1.4 ms |
+| records-10k    |         1.3 ms |   15.3 ms |    16.6 ms |
+| deep-6x4       |        0.08 ms |   0.65 ms |    0.74 ms |
+| paths-5k       |        0.08 ms |    4.6 ms |     4.8 ms |
+| large-sample   |          28 ms |    375 ms |     393 ms |
+| large-sample-2 |          64 ms |    428 ms |     427 ms |
 
 RXB encoding speed is within ~10% of RX. Both are slower than `JSON.stringify` because they perform structural dedup, schema detection, and index building — features that enable smaller output and O(1)/O(log n) random access without parsing.
 

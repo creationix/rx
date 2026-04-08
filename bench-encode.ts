@@ -103,13 +103,15 @@ for (const file of readdirSync(samplesDir).filter((f) => f.endsWith(".json"))) {
   datasets.push({ name: `file:${file}`, data: JSON.parse(raw) });
 }
 
-// Load large JSON sample if present
-const largeSamplePath = join(import.meta.dirname!, "large-sample.json");
-if (existsSync(largeSamplePath)) {
-  console.log("Loading large-sample.json...");
-  const data = JSON.parse(readFileSync(largeSamplePath, "utf-8"));
-  console.log("Done.\n");
-  datasets.push({ name: "large-sample", data });
+// Load large JSON samples if present
+for (const file of ["large-sample.json", "large-sample-2.json"]) {
+  const path = join(import.meta.dirname!, file);
+  if (existsSync(path)) {
+    console.log(`Loading ${file}...`);
+    const data = JSON.parse(readFileSync(path, "utf-8"));
+    console.log("Done.");
+    datasets.push({ name: file.replace(".json", ""), data });
+  }
 }
 
 console.log("=== RX / RXB Encode Benchmark ===\n");
