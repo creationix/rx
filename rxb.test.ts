@@ -1,25 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   encode,
-  decode,
-  open,
-  read,
-  readStr,
-  makeCursor,
   tagVarintSize,
   tagVarintWrite,
   tagVarintRead,
-  isHexString,
-  hexEncode,
+  classifyString,
+  hexEncodeInto,
   hexDecode,
-  findKey,
-  seekChild,
-  collectChildren,
-  resolveStr,
-  strCompare,
-  strEquals,
-  strHasPrefix,
-  prepareKey,
   TAG_INT,
   TAG_STRING,
   TAG_HEXSTR,
@@ -38,8 +25,24 @@ import {
   REF_NINF,
   REF_NAN,
 } from "./rxb.ts";
+import {
+  decode,
+  open,
+  read,
+  readStr,
+  makeCursor,
+  findKey,
+  seekChild,
+  collectChildren,
+  resolveStr,
+  strCompare,
+  strEquals,
+  strHasPrefix,
+  prepareKey,
+} from "./rxb-read.ts";
 
-import { encode as rxEncode, parse as rxParse } from "./rx.ts";
+import { encode as rxEncode } from "./rx.ts";
+import { parse as rxParse } from "./rx-read.ts";
 
 // ── Helper ──
 
@@ -119,20 +122,22 @@ describe("tagVarint", () => {
 // ── Hexstring helpers ──
 
 describe("hexstring helpers", () => {
-  it("isHexString detects valid hex", () => {
-    expect(isHexString("deadbeef")).toBe(true);
-    expect(isHexString("0123456789abcdef")).toBe(true);
-    expect(isHexString("abc")).toBe(false); // too short
-    expect(isHexString("")).toBe(false);
-    expect(isHexString("DEADBEEF")).toBe(false); // uppercase
-    expect(isHexString("hello")).toBe(false);
-    expect(isHexString("abcg")).toBe(false);
+  it("classifyString detects hex, b64, and regular", () => {
+    expect(classifyString("deadbeef")).toBe(1); // hex
+    expect(classifyString("0123456789abcdef")).toBe(1); // hex
+    expect(classifyString("abc")).toBe(0); // too short
+    expect(classifyString("")).toBe(0); // too short
+    expect(classifyString("DEADBEEF")).toBe(2); // uppercase = b64, not hex
+    expect(classifyString("hello")).toBe(2); // all b64
+    expect(classifyString("abcg")).toBe(2); // g is b64 but not hex
+    expect(classifyString("hello world")).toBe(0); // space = regular
+    expect(classifyString("path/to")).toBe(0); // / = regular
   });
 
-  it("hexEncode/hexDecode roundtrip even length", () => {
+  it("hexEncodeInto/hexDecode roundtrip even length", () => {
     const hex = "deadbeef";
-    const packed = hexEncode(hex);
-    expect(packed.length).toBe(4);
+    const packed = new Uint8Array(4);
+    hexEncodeInto(hex, packed, 0);
     expect(packed[0]).toBe(0xDE);
     expect(packed[1]).toBe(0xAD);
     expect(packed[2]).toBe(0xBE);
@@ -141,10 +146,10 @@ describe("hexstring helpers", () => {
     expect(decoded).toBe(hex);
   });
 
-  it("hexEncode/hexDecode roundtrip odd length", () => {
+  it("hexEncodeInto/hexDecode roundtrip odd length", () => {
     const hex = "abcde";
-    const packed = hexEncode(hex);
-    expect(packed.length).toBe(3);
+    const packed = new Uint8Array(3);
+    hexEncodeInto(hex, packed, 0);
     const decoded = hexDecode(packed, 0, packed.length, hex.length);
     expect(decoded).toBe(hex);
   });

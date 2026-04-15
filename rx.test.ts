@@ -2,6 +2,8 @@ import { describe, expect, test } from "vitest";
 import {
 	encode,
 	stringify,
+} from "./rx";
+import {
 	parse,
 	makeCursor,
 	read,
@@ -20,7 +22,7 @@ import {
 	findByPrefix,
 	inspect,
 	type ASTNode,
-} from "./rx";
+} from "./rx-read";
 
 function cur(value: unknown, opts?: Parameters<typeof encode>[1]) {
 	const data = encode(value, opts);
