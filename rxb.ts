@@ -1187,7 +1187,7 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   const opts = { ...ENCODE_DEFAULTS, ...options };
   const indexThreshold = opts.indexThreshold ?? INDEX_THRESHOLD;
   const chainThreshold = opts.stringChainThreshold ?? Math.min(STRING_CHAIN_THRESHOLD, 24);
-  const chainDelimiter = opts.stringChainDelimiter ?? "/=";
+  const chainDelimiter = opts.stringChainDelimiter ?? "/.";
 
   // Build a fast delimiter lookup set for chain splitting (supports multi-char delimiter strings)
   const chainDelimSet = new Uint8Array(128);
