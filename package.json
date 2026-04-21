@@ -1,6 +1,6 @@
 {
 	"name": "@creationix/rx",
-	"version": "0.7.6",
+	"version": "0.8.0",
 	"description": "REXC encoder, decoder, and CLI data tool",
 	"keywords": [
 		"rexc",
@@ -14,14 +14,14 @@
 	"bin": {
 		"rx": "./dist/rx-cli.js"
 	},
-	"main": "./dist/rx.cjs",
-	"module": "./dist/rx.js",
-	"types": "./dist/rx.d.ts",
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
 	"exports": {
 		".": {
-			"types": "./dist/rx.d.ts",
-			"import": "./dist/rx.js",
-			"require": "./dist/rx.cjs"
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
 		}
 	},
 	"files": [
@@ -34,8 +34,8 @@
 	},
 	"scripts": {
 		"build:clean": "rm -rf dist",
-		"build:esm": "bun build rx.ts rx-cli.ts --outdir dist --target node --format esm",
-		"build:cjs": "bun build rx.ts --target node --format cjs --outfile dist/rx.cjs",
+		"build:esm": "bun build index.ts rx-cli.ts --outdir dist --target node --format esm",
+		"build:cjs": "bun build index.ts --target node --format cjs --outfile dist/index.cjs",
 		"build:types": "tsc",
 		"build:shebang": "printf '#!/usr/bin/env node\\n' | cat - dist/rx-cli.js > dist/rx-cli.tmp && mv dist/rx-cli.tmp dist/rx-cli.js",
 		"build": "bun run build:clean && bun run build:esm && bun run build:cjs && bun run build:types && bun run build:shebang",

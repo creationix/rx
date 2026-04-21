@@ -272,6 +272,20 @@ const elem = root.index(2);        // array index
 
 For zero-allocation traversal without the Proxy layer, see **[docs/cursor-api.md](docs/cursor-api.md)**.
 
+## Binary format (RXB)
+
+RXB is a binary sibling format — same data model and right-to-left design as the text format, but with varint-tag encoding for smaller output and faster parsing. Use it when you don't need the copy-pasteable text property.
+
+```ts
+import { rxbEncode, rxbOpen, rxbDecode } from "@creationix/rx";
+
+const buf = rxbEncode({ users: ["alice", "bob"], version: 3 });
+const data = rxbOpen(buf) as any;
+data.users[1];  // "bob"
+```
+
+The full reader and cursor API mirrors the text side with an `rxb` prefix: `rxbMakeCursor`, `rxbRead`, `rxbFindKey`, `rxbHandle`, etc. See **[docs/rxb-format.md](docs/rxb-format.md)** for the wire format.
+
 ## Proxy behavior
 
 The value returned by `parse`/`open` is **read-only**:
@@ -295,7 +309,8 @@ const h = handle(obj.nested);
 
 ## More
 
-- **[docs/rx-format.md](docs/rx-format.md)** — format spec, grammar, and railroad diagrams
+- **[docs/rx-format.md](docs/rx-format.md)** — text format spec, grammar, and railroad diagrams
+- **[docs/rxb-format.md](docs/rxb-format.md)** — binary format spec
 - **[docs/cursor-api.md](docs/cursor-api.md)** — low-level zero-allocation cursor API
 - **[rx-perf.md](rx-perf.md)** — cursor internals, Proxy design, allocation profile
 - **[samples/](samples/)** — example datasets with JSON/RX pairs
