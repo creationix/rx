@@ -36,7 +36,7 @@
 		"build:clean": "rm -rf dist",
 		"build:esm": "bun build index.ts rx-cli.ts --outdir dist --target node --format esm",
 		"build:cjs": "bun build index.ts --target node --format cjs --outfile dist/index.cjs",
-		"build:types": "tsc",
+		"build:types": "bunx tsc",
 		"build:shebang": "printf '#!/usr/bin/env node\\n' | cat - dist/rx-cli.js > dist/rx-cli.tmp && mv dist/rx-cli.tmp dist/rx-cli.js",
 		"build": "bun run build:clean && bun run build:esm && bun run build:cjs && bun run build:types && bun run build:shebang",
 		"prepublishOnly": "bun test && bun run build",
