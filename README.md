@@ -162,44 +162,76 @@ const data = parse(payload, { refs: { R: ["/api/users", "/api/teams"] } });
 ## CLI
 
 ```sh
-rx data.rx                         # pretty-print as tree
-rx data.rx -j                      # convert to JSON
-rx data.json -r                    # convert to RX
+rx data.rx                         # pretty-print (default action)
 cat data.rx | rx                   # read from stdin (auto-detect)
-rx data.rx -s key 0 sub            # select a sub-value
-rx data.rx -o out.json             # write to file
-rx data.rx --ast                   # output encoding structure as JSON
+rx convert data.json data.rx       # JSON → RX
+rx convert data.rx data.rxb        # RX text → RX binary
+rx convert data.rx - --to json     # write JSON to stdout
+rx get data.rx users 0 name        # extract a value at a path
 ```
+
+Output format defaults to **tree** when stdout is a terminal and **json** when piped or redirected. Override with `-f tree|json|rx|rxb` or set `RX_FORMAT`.
 
 > **Tip:** Add a shell function for quick paged, colorized viewing:
 > ```sh
-> p() { rx "$1" -t -c | less -RFX; }
+> p() { rx "$1" -f tree -c | less -RFX; }
 > ```
 
 <details>
 <summary><strong>Full CLI reference</strong></summary>
 
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `rx FILE` | Pretty-print FILE (shortcut for `rx show FILE`) |
+| `rx show [FILE \| -]` | Pretty-print a file |
+| `rx convert SRC DST` | Convert between formats; direction from extensions, or `--from` / `--to` |
+| `rx get FILE [SEGMENT...]` | Extract a value at a path |
+| `rx help [COMMAND \| --all]` | Show help (`--all` for advanced commands) |
+
+Advanced (`rx help --all`): `rx inspect`, `rx stats`, `rx demo`, `rx completions`.
+
+### Shared options (`show`, `get`)
+
 | Flag | Description |
 |------|-------------|
-| `<file>` | Input file (format auto-detected by contents) |
-| `-` | Read from stdin explicitly |
-| `-j`, `--json` | Output as JSON |
-| `-r`, `--rexc` | Output as RX |
-| `-t`, `--tree` | Output as tree (default on TTY) |
-| `-a`, `--ast` | Output encoding structure |
-| `-s`, `--select <seg>...` | Select a sub-value |
-| `-w`, `--write` | Write converted file (`.json`↔`.rx`) |
-| `-o`, `--out <path>` | Write to file instead of stdout |
+| `-f`, `--format FMT` | Output format: `tree` \| `json` \| `rx` \| `rxb` |
+| `-w`, `--width N` | Target line width for tree (default: 80) |
 | `-c`, `--color` / `--no-color` | Force or disable ANSI color |
-| `--index-threshold <n>` | Index containers above n values (default: 16) |
-| `--string-chain-threshold <n>` | Split strings longer than n into chains (default: 64) |
-| `--string-chain-delimiter <s>` | Delimiter for string chains (default: `/`) |
-| `--key-complexity-threshold <n>` | Max object complexity for dedupe keys (default: 100) |
+| `-o`, `--output PATH` | Write to PATH instead of stdout |
 
-Shell completions:
+### `convert` options
+
+| Flag | Description |
+|------|-------------|
+| `--from FMT` | Input format when SRC is `-` (auto-detected from stdin content otherwise) |
+| `--to FMT` | Output format when DST is `-` |
+| `--tune-index-threshold N` | Index containers above N values (default: 16) |
+| `--tune-chain-threshold N` | Split strings longer than N (default: 24) |
+| `--tune-chain-delimiter S` | Delimiters for chain splitting (default: `/.`) |
+| `--tune-dedup-limit N` | Max node count for structural dedup (default: 32) |
+
+### Global
+
+| Flag | Description |
+|------|-------------|
+| `-h`, `--help` | Show help (or `rx COMMAND --help` for a command) |
+| `-v`, `--version` | Print version |
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `RX_FORMAT` | Pin default output format regardless of TTY |
+| `NO_COLOR` | Disable ANSI color when set |
+
+### Shell completions
 
 ```sh
-rx --completions setup [zsh|bash]
+rx completions install            # auto-detect shell
+rx completions install bash       # explicit
+rx completions zsh > ~/.zsh/_rx   # print script to stdout
 ```
 
 </details>
