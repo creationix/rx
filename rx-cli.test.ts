@@ -72,9 +72,10 @@ describe("rx --version / --help", () => {
 		expect(r.stdout).toContain("rx — convert");
 		expect(r.stdout).toContain("show");
 		expect(r.stdout).toContain("convert");
-		expect(r.stdout).toContain("get");
 		expect(r.stdout).toContain("FORMATS");
 		expect(r.stdout).toContain("RX_FORMAT");
+		// `get` was merged into `show` — must NOT appear as a subcommand
+		expect(r.stdout).not.toMatch(/^\s+get\s/m);
 	});
 
 	test("no args with stdin TTY-less shows help", () => {
@@ -94,7 +95,7 @@ describe("rx --version / --help", () => {
 	});
 
 	test("help COMMAND shows subcommand help", () => {
-		for (const sub of ["show", "convert", "get", "inspect", "stats", "demo", "completions"]) {
+		for (const sub of ["show", "convert", "inspect", "stats", "demo", "completions"]) {
 			const r = run(["help", sub]);
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout).toContain(`rx ${sub}`);
@@ -103,12 +104,18 @@ describe("rx --version / --help", () => {
 	});
 
 	test("COMMAND --help matches help COMMAND", () => {
-		for (const sub of ["show", "convert", "get"]) {
+		for (const sub of ["show", "convert"]) {
 			const a = run([sub, "--help"]);
 			const b = run(["help", sub]);
 			expect(a.exitCode).toBe(0);
 			expect(a.stdout).toBe(b.stdout);
 		}
+	});
+
+	test("`get` is no longer a subcommand", () => {
+		const r = run(["help", "get"]);
+		expect(r.exitCode).toBe(2);
+		expect(r.stderr).toContain("unknown command 'get'");
 	});
 
 	test("help typo suggests correct command", () => {
@@ -179,10 +186,14 @@ describe("rx show / default action", () => {
 		expect(JSON.parse(r.stdout)).toEqual(SAMPLE);
 	});
 
-	test("rx show multiple files errors", () => {
-		const r = run(["show", jsonFile, rxFile]);
+	test("extra positional after FILE is treated as a path segment, not a second file", () => {
+		// `rx show f1 f2` is `show f1` with segment "f2" — should error as a missing
+		// path key in the parsed value, not as "too many files".
+		const r = run(["show", jsonFile, "not-a-key"]);
 		expect(r.exitCode).toBe(2);
-		expect(r.stderr).toContain("takes only one input");
+		expect(r.stderr).toContain("rx show:");
+		expect(r.stderr).toContain("not-a-key");
+		expect(r.stderr).not.toContain("only one input");
 	});
 
 	test("--no-color strips ANSI", () => {
@@ -308,67 +319,61 @@ describe("rx convert", () => {
 	});
 });
 
-describe("rx get", () => {
+describe("rx show with path segments (formerly `get`)", () => {
 	test("extracts string at path", () => {
-		const r = run(["get", rxFile, "name", "-f", "json"]);
+		const r = run(["show", rxFile, "name", "-f", "json"]);
 		expect(r.exitCode).toBe(0);
 		expect(JSON.parse(r.stdout)).toBe("test");
 	});
 
 	test("extracts number at path", () => {
-		const r = run(["get", rxFile, "count", "-f", "json"]);
+		const r = run(["show", rxFile, "count", "-f", "json"]);
 		expect(r.exitCode).toBe(0);
 		expect(JSON.parse(r.stdout)).toBe(42);
 	});
 
 	test("extracts nested path with array index", () => {
-		const r = run(["get", rxFile, "nested", "c", "1", "-f", "json"]);
+		const r = run(["show", rxFile, "nested", "c", "1", "-f", "json"]);
 		expect(r.exitCode).toBe(0);
 		expect(JSON.parse(r.stdout)).toBe(20);
 	});
 
 	test("extracts subtree", () => {
-		const r = run(["get", rxFile, "tags", "-f", "json"]);
+		const r = run(["show", rxFile, "tags", "-f", "json"]);
 		expect(r.exitCode).toBe(0);
 		expect(JSON.parse(r.stdout)).toEqual(["alpha", "beta", "gamma"]);
 	});
 
-	test("no segments returns entire value", () => {
-		const r = run(["get", rxFile, "-f", "json"]);
+	test("bare-file shortcut accepts segments", () => {
+		const r = run([rxFile, "tags", "1", "-f", "json"]);
 		expect(r.exitCode).toBe(0);
-		expect(JSON.parse(r.stdout)).toEqual(SAMPLE);
+		expect(JSON.parse(r.stdout)).toBe("beta");
 	});
 
 	test("missing key error includes path", () => {
-		const r = run(["get", rxFile, "nested", "nope"]);
+		const r = run(["show", rxFile, "nested", "nope"]);
 		expect(r.exitCode).toBe(2);
-		expect(r.stderr).toContain("rx get:");
+		expect(r.stderr).toContain("rx show:");
 		expect(r.stderr).toContain("nested, nope");
 		expect(r.stderr).toContain("not found");
 	});
 
 	test("out-of-range index error includes length", () => {
-		const r = run(["get", rxFile, "tags", "99"]);
+		const r = run(["show", rxFile, "tags", "99"]);
 		expect(r.exitCode).toBe(2);
-		expect(r.stderr).toContain("rx get:");
+		expect(r.stderr).toContain("rx show:");
 		expect(r.stderr).toContain("index 99 out of range");
 		expect(r.stderr).toContain("3-element array");
 	});
 
 	test("can't-index error includes type", () => {
-		const r = run(["get", rxFile, "count", "foo"]);
+		const r = run(["show", rxFile, "count", "foo"]);
 		expect(r.exitCode).toBe(2);
 		expect(r.stderr).toContain("cannot index into number");
 	});
 
-	test("missing FILE errors", () => {
-		const r = run(["get"]);
-		expect(r.exitCode).toBe(2);
-		expect(r.stderr).toContain("missing FILE argument");
-	});
-
-	test("-f rx output round-trips", () => {
-		const r = run(["get", rxFile, "nested", "-f", "rx"]);
+	test("-f rx output of subtree round-trips", () => {
+		const r = run(["show", rxFile, "nested", "-f", "rx"]);
 		expect(r.exitCode).toBe(0);
 		const tmp = join(dir, "sub.rx");
 		writeFileSync(tmp, r.stdout.trim());
@@ -376,8 +381,8 @@ describe("rx get", () => {
 		expect(JSON.parse(back.stdout)).toEqual(SAMPLE.nested);
 	});
 
-	test("reads from stdin", () => {
-		const r = run(["get", "-", "count", "-f", "json"], JSON.stringify(SAMPLE));
+	test("reads from stdin with segments", () => {
+		const r = run(["show", "-", "count", "-f", "json"], JSON.stringify(SAMPLE));
 		expect(r.exitCode).toBe(0);
 		expect(JSON.parse(r.stdout)).toBe(42);
 	});
@@ -420,6 +425,88 @@ describe("advanced commands", () => {
 		const r = run(["completions", "bash"]);
 		expect(r.exitCode).toBe(0);
 		expect(r.stdout).toContain("complete -o default");
+	});
+
+	test("completions --complete (no words) lists subcommands", () => {
+		const r = run(["completions", "--complete", "--", ""]);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		expect(lines).toContain("show");
+		expect(lines).toContain("convert");
+		expect(lines).not.toContain("get");
+	});
+
+	test("completions --complete completes flags after subcommand", () => {
+		const r = run(["completions", "--complete", "--", "show", "-"]);
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout).toContain("--format");
+		expect(r.stdout).toContain("--width");
+	});
+
+	test("completions --complete completes format values after -f", () => {
+		const r = run(["completions", "--complete", "--", "show", "-f", ""]);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		expect(lines).toEqual(expect.arrayContaining(["tree", "json", "rx", "rxb"]));
+	});
+
+	test("top-level './' triggers file completion", () => {
+		// dir contains sample.json/rx/rxb fixtures created in beforeAll
+		const r = run(["completions", "--complete", "--", "./"], undefined, {});
+		expect(r.exitCode).toBe(0);
+		// Should contain at least some of the data extensions when run from cwd
+		// (cwd here is rx project root, which has buildinfo.* files)
+		const lines = r.stdout.trim().split("\n");
+		expect(lines.some(l => l.endsWith(".json") || l.endsWith(".rx") || l.endsWith(".rxb") || l.endsWith("/"))).toBe(true);
+	});
+
+	test("top-level word matching no subcommand falls back to files", () => {
+		// "buildinfo" doesn't match any subcommand → should yield buildinfo.* files
+		const r = run(["completions", "--complete", "--", "buildinfo"]);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n").filter(Boolean);
+		expect(lines.length).toBeGreaterThan(0);
+		expect(lines.every(l => l.startsWith("buildinfo"))).toBe(true);
+	});
+
+	test("top-level subcommand prefix takes precedence over files", () => {
+		// "s" matches subcommands (show, stats) — should NOT include any files even
+		// if there's a file starting with "s" in cwd
+		const r = run(["completions", "--complete", "--", "s"]);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		expect(lines).toContain("show");
+		expect(lines).toContain("stats");
+		// All entries must be subcommands (no path separators, no extensions)
+		for (const l of lines) {
+			expect(l).not.toContain("/");
+			expect(l).not.toContain(".");
+		}
+	});
+});
+
+describe("backwards-compat completion shim", () => {
+	// Shell scripts installed by rx <= 0.8.x invoke `rx --completions -- <words>`.
+	// New scripts use `rx completions --complete -- <words>`. Both must work so
+	// users upgrading to 0.9+ without reinstalling get sane completions.
+	test("--completions -- (no words) lists subcommands", () => {
+		const r = run(["--completions", "--", ""]);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		expect(lines).toContain("show");
+		expect(lines).toContain("convert");
+	});
+
+	test("--completions -- 'show' lists subcommand match", () => {
+		const r = run(["--completions", "--", "show"]);
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout.trim()).toBe("show");
+	});
+
+	test("--completions zsh emits script", () => {
+		const r = run(["--completions", "zsh"]);
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout).toContain("#compdef rx");
 	});
 });
 

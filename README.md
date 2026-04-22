@@ -162,12 +162,12 @@ const data = parse(payload, { refs: { R: ["/api/users", "/api/teams"] } });
 ## CLI
 
 ```sh
-rx data.rx                         # pretty-print (default action)
+rx data.rx                         # pretty-print whole file (default action)
+rx data.rx users 0 name            # show value at data.users[0].name
 cat data.rx | rx                   # read from stdin (auto-detect)
 rx convert data.json data.rx       # JSON → RX
 rx convert data.rx data.rxb        # RX text → RX binary
 rx convert data.rx - --to json     # write JSON to stdout
-rx get data.rx users 0 name        # extract a value at a path
 ```
 
 Output format defaults to **tree** when stdout is a terminal and **json** when piped or redirected. Override with `-f tree|json|rx|rxb` or set `RX_FORMAT`.
@@ -184,15 +184,14 @@ Output format defaults to **tree** when stdout is a terminal and **json** when p
 
 | Command | Description |
 |---------|-------------|
-| `rx FILE` | Pretty-print FILE (shortcut for `rx show FILE`) |
-| `rx show [FILE \| -]` | Pretty-print a file |
+| `rx FILE [SEGMENT...]` | Pretty-print FILE, or value at path (shortcut for `rx show`) |
+| `rx show [FILE \| -] [SEGMENT...]` | Pretty-print a file or a value at a path |
 | `rx convert SRC DST` | Convert between formats; direction from extensions, or `--from` / `--to` |
-| `rx get FILE [SEGMENT...]` | Extract a value at a path |
 | `rx help [COMMAND \| --all]` | Show help (`--all` for advanced commands) |
 
 Advanced (`rx help --all`): `rx inspect`, `rx stats`, `rx demo`, `rx completions`.
 
-### Shared options (`show`, `get`)
+### `show` options
 
 | Flag | Description |
 |------|-------------|

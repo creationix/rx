@@ -397,18 +397,23 @@ function parseIntFlag(v: string | undefined, flag: string, subcmd: string): numb
 }
 
 // ── Subcommand: show ─────────────────────────────────────────────────────────
+// Pretty-print a file, optionally narrowed to a sub-tree at the given path.
+// With no segments, shows the whole value (formerly the `show` verb's only mode).
+// With segments, shows the value at that path (formerly the `get` verb).
 
 function helpShow(): string {
 	return `
-${tH1}rx show${tR} — pretty-print a file.
+${tH1}rx show${tR} — pretty-print a file or a value at a path.
 
 ${tH2}USAGE${tR}
-  ${tCmd}rx show${tR} [${tArg}FILE${tR} | ${tArg}-${tR}]
-  ${tCmd}rx${tR} ${tArg}FILE${tR}                            ${tDesc}# shortcut for ${tCmd}rx show FILE${tR}
+  ${tCmd}rx show${tR} [${tArg}FILE${tR} | ${tArg}-${tR}] [${tArg}SEGMENT${tR}...]
+  ${tCmd}rx${tR} ${tArg}FILE${tR} [${tArg}SEGMENT${tR}...]              ${tDesc}# shortcut, no subcommand needed${tR}
 
 ${tH2}ARGUMENTS${tR}
   ${tArg}FILE${tR}                              Path to .json, .rx, or .rxb. Use ${tArg}-${tR} for stdin.
                                     Format auto-detected by extension then by content.
+  ${tArg}SEGMENT${tR}                           One key or numeric index per segment.
+                                    No segments = entire file.
 
 ${tH2}OPTIONS${tR}
   ${tCmd}-f${tR}, ${tCmd}--format${tR} ${tArg}FMT${tR}                  Output format: ${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
@@ -424,17 +429,25 @@ ${tH2}DEFAULTS${tR}
   Color:  on when stdout is a terminal, off otherwise. ${tArg}NO_COLOR${tR} env disables.
 
 ${tH2}EXAMPLES${tR}
-  ${tCmd}rx show${tR} ${tArg}data.rx${tR}
+  ${tCmd}rx show${tR} ${tArg}data.rx${tR}                     ${tDesc}# whole file${tR}
   ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}# same thing${tR}
+  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tArg}name${tR}            ${tDesc}# data.users[0].name${tR}
+  ${tCmd}rx show${tR} ${tArg}data.rx${tR} ${tArg}config${tR}              ${tDesc}# data.config subtree${tR}
   ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}                   ${tDesc}# from stdin${tR}
-  ${tCmd}rx show${tR} ${tArg}data.json${tR} ${tCmd}-f rx${tR}            ${tDesc}# JSON file displayed in rx text${tR}
+  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tCmd}-f${tR} ${tArg}json${tR} | ${tCmd}jq${tR} ${tArg}length${tR}
+  ${tCmd}rx show${tR} ${tArg}data.json${tR} ${tCmd}-f${tR} ${tArg}rx${tR}            ${tDesc}# JSON file displayed in rx text${tR}
   ${tCmd}rx show${tR} ${tArg}data.rx${tR} ${tCmd}-w${tR} ${tArg}120${tR}             ${tDesc}# wider terminal layout${tR}
-  ${tCmd}rx show${tR} ${tArg}data.rx${tR} ${tCmd}--no-color${tR} ${tCmd}-o${tR} ${tArg}view.txt${tR}
+
+${tH2}ERRORS${tR}
+  ${tDim}rx show: path [users, 999] — index 999 out of range in 5-element array${tR}
+  ${tDim}rx show: path [config, db] — 'db' not found in object at [config]${tR}
+  ${tDim}rx show: path [count] — cannot index into number at []${tR}
 `;
 }
 
 type ShowOpts = {
 	file: string;
+	segments: string[];
 	format?: OutputFormat;
 	width: number;
 	color?: boolean;
@@ -442,7 +455,7 @@ type ShowOpts = {
 };
 
 function parseShowArgs(argv: string[]): ShowOpts {
-	const opts: ShowOpts = { file: "", width: 80 };
+	const opts: ShowOpts = { file: "", segments: [], width: 80 };
 	let gotFile = false;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -455,10 +468,10 @@ function parseShowArgs(argv: string[]): ShowOpts {
 			const v = argv[++i]; if (!v) fail("show", `${arg} requires a value`, `example: ${arg} out.txt`);
 			opts.output = v; continue;
 		}
-		if (arg === "-") { if (gotFile) fail("show", "takes only one input"); opts.file = "-"; gotFile = true; continue; }
-		if (arg.startsWith("-")) fail("show", `unknown option: ${arg}`, `run 'rx show --help' for usage`);
-		if (gotFile) fail("show", "takes only one input", `for batch, use shell: for f in *.rx; do rx show "$f"; done`);
-		opts.file = arg; gotFile = true;
+		if (arg === "-" && !gotFile) { opts.file = "-"; gotFile = true; continue; }
+		if (arg.startsWith("-") && arg !== "-") fail("show", `unknown option: ${arg}`, `run 'rx show --help' for usage`);
+		if (!gotFile) { opts.file = arg; gotFile = true; continue; }
+		opts.segments.push(arg);
 	}
 	if (!gotFile) opts.file = process.stdin.isTTY ? "" : "-";
 	return opts;
@@ -472,7 +485,8 @@ async function runShow(argv: string[]): Promise<void> {
 	const format = resolveOutputFormat(opts.format, isTTY);
 	applyTheme(color);
 	const parsed = await readSource(opts.file);
-	const bytes = render(parsed.value, format, color && format !== "rxb", opts.width);
+	const value = opts.segments.length > 0 ? applyPath(parsed.value, opts.segments) : parsed.value;
+	const bytes = render(value, format, color && format !== "rxb", opts.width);
 	if (opts.output) await writeFile(opts.output, bytes);
 	else process.stdout.write(bytes);
 }
@@ -596,81 +610,7 @@ async function runConvert(argv: string[]): Promise<void> {
 	else await writeFile(opts.dst, toWrite);
 }
 
-// ── Subcommand: get ──────────────────────────────────────────────────────────
-
-function helpGet(): string {
-	return `
-${tH1}rx get${tR} — extract a value at a path.
-
-${tH2}USAGE${tR}
-  ${tCmd}rx get${tR} ${tArg}FILE${tR} [${tArg}SEGMENT${tR}...]
-
-${tH2}ARGUMENTS${tR}
-  ${tArg}FILE${tR}                              Path to .json, .rx, or .rxb. Use ${tArg}-${tR} for stdin.
-  ${tArg}SEGMENT${tR}                           One key or numeric index per segment.
-                                    No segments = entire file.
-
-${tH2}OPTIONS${tR}
-  ${tCmd}-f${tR}, ${tCmd}--format${tR} ${tArg}FMT${tR}                  Output format: ${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
-  ${tCmd}-w${tR}, ${tCmd}--width${tR} ${tArg}N${tR}                     Target line width for tree output ${tDim}(default: 80)${tR}
-  ${tCmd}-c${tR}, ${tCmd}--color${tR}                         Force ANSI color
-      ${tCmd}--no-color${tR}                      Disable color
-  ${tCmd}-o${tR}, ${tCmd}--output${tR} ${tArg}PATH${tR}                 Write to PATH instead of stdout
-  ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
-
-${tH2}DEFAULTS${tR}
-  Format: ${tArg}tree${tR} when stdout is a terminal, ${tArg}json${tR} when piped or redirected.
-          Override with ${tCmd}-f${tR} or set ${tArg}RX_FORMAT${tR} env var.
-
-${tH2}EXAMPLES${tR}
-  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tArg}name${tR}           ${tDesc}# data.users[0].name${tR}
-  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}config${tR}              ${tDesc}# data.config subtree${tR}
-  ${tCmd}rx get${tR} ${tArg}data.rx${tR}                     ${tDesc}# whole file${tR}
-  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tCmd}-f${tR} ${tArg}rx${tR}        ${tDesc}# emit subtree as rx${tR}
-  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx get${tR} ${tArg}-${tR} ${tArg}foo${tR} ${tArg}bar${tR}       ${tDesc}# from stdin${tR}
-  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tCmd}-f${tR} ${tArg}json${tR} | ${tCmd}jq${tR} ${tArg}length${tR}
-
-${tH2}ERRORS${tR}
-  ${tDim}rx get: path [users, 999] — index 999 out of range in 5-element array${tR}
-  ${tDim}rx get: path [config, db] — 'db' not found in object at [config]${tR}
-  ${tDim}rx get: path [count] — cannot index into number at []${tR}
-`;
-}
-
-type GetOpts = {
-	file: string;
-	segments: string[];
-	format?: OutputFormat;
-	width: number;
-	color?: boolean;
-	output?: string;
-};
-
-function parseGetArgs(argv: string[]): GetOpts {
-	const opts: GetOpts = { file: "", segments: [], width: 80 };
-	let gotFile = false;
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i]!;
-		if (arg === "-h" || arg === "--help") { process.stdout.write(helpGet()); process.exit(0); }
-		if (arg === "-c" || arg === "--color") { opts.color = true; continue; }
-		if (arg === "--no-color") { opts.color = false; continue; }
-		if (arg === "-f" || arg === "--format") { opts.format = parseFormatFlag(argv[++i], arg, "get"); continue; }
-		if (arg === "-w" || arg === "--width") { opts.width = parseIntFlag(argv[++i], arg, "get"); continue; }
-		if (arg === "-o" || arg === "--output") {
-			const v = argv[++i]; if (!v) fail("get", `${arg} requires a value`);
-			opts.output = v; continue;
-		}
-		if (arg === "-" && !gotFile) { opts.file = "-"; gotFile = true; continue; }
-		if (arg.startsWith("-") && arg !== "-") {
-			// Negative numeric segment (e.g. -1) — ambiguous with flags; disallow to keep parser simple
-			fail("get", `unknown option: ${arg}`, `run 'rx get --help' for usage`);
-		}
-		if (!gotFile) { opts.file = arg; gotFile = true; continue; }
-		opts.segments.push(arg);
-	}
-	if (!gotFile) fail("get", "missing FILE argument", `example: rx get data.rx users 0 name`);
-	return opts;
-}
+// ── Path traversal (used by `show` for sub-tree extraction) ──────────────────
 
 function applyPath(value: unknown, segments: string[]): unknown {
 	let current: unknown = value;
@@ -679,19 +619,19 @@ function applyPath(value: unknown, segments: string[]): unknown {
 		if (Array.isArray(current)) {
 			const idx = /^\d+$/.test(seg) ? parseInt(seg, 10) : NaN;
 			if (!Number.isInteger(idx)) {
-				fail("get", `path [${[...trail, seg].join(", ")}] — '${seg}' is not a numeric index (array at [${trail.join(", ")}] has length ${current.length})`);
+				fail("show", `path [${[...trail, seg].join(", ")}] — '${seg}' is not a numeric index (array at [${trail.join(", ")}] has length ${current.length})`);
 			}
 			if (idx < 0 || idx >= current.length) {
-				fail("get", `path [${[...trail, seg].join(", ")}] — index ${idx} out of range in ${current.length}-element array`);
+				fail("show", `path [${[...trail, seg].join(", ")}] — index ${idx} out of range in ${current.length}-element array`);
 			}
 			current = current[idx];
 		} else if (isObj(current)) {
 			if (!(seg in current)) {
-				fail("get", `path [${[...trail, seg].join(", ")}] — '${seg}' not found in object at [${trail.join(", ")}]`);
+				fail("show", `path [${[...trail, seg].join(", ")}] — '${seg}' not found in object at [${trail.join(", ")}]`);
 			}
 			current = current[seg];
 		} else {
-			fail("get", `path [${[...trail, seg].join(", ")}] — cannot index into ${typeLabel(current)} at [${trail.join(", ")}]`);
+			fail("show", `path [${[...trail, seg].join(", ")}] — cannot index into ${typeLabel(current)} at [${trail.join(", ")}]`);
 		}
 		trail.push(seg);
 	}
@@ -702,19 +642,6 @@ function typeLabel(v: unknown): string {
 	if (v === null) return "null";
 	if (Array.isArray(v)) return "array";
 	return typeof v;
-}
-
-async function runGet(argv: string[]): Promise<void> {
-	const opts = parseGetArgs(argv);
-	const isTTY = opts.output ? false : (process.stdout.isTTY ?? false);
-	const color = resolveColor(opts.color, isTTY);
-	const format = resolveOutputFormat(opts.format, isTTY);
-	applyTheme(color);
-	const parsed = await readSource(opts.file);
-	const picked = applyPath(parsed.value, opts.segments);
-	const bytes = render(picked, format, color && format !== "rxb", opts.width);
-	if (opts.output) await writeFile(opts.output, bytes);
-	else process.stdout.write(bytes);
 }
 
 // ── Subcommand: inspect ──────────────────────────────────────────────────────
@@ -936,7 +863,7 @@ ${tH2}EXAMPLES${tR}
 `;
 }
 
-const SUBCOMMANDS = ["show", "convert", "get", "inspect", "stats", "demo", "completions", "help"] as const;
+const SUBCOMMANDS = ["show", "convert", "inspect", "stats", "demo", "completions", "help"] as const;
 
 async function runCompletions(argv: string[]): Promise<void> {
 	const sub = argv[0];
@@ -957,10 +884,24 @@ async function runCompletions(argv: string[]): Promise<void> {
 async function handleCompleteRequest(words: string[]): Promise<void> {
 	const current = words[words.length - 1] ?? "";
 	const prev = words.length >= 2 ? words[words.length - 2] : undefined;
-	// First word: subcommand
+	// First word: subcommand or bare-file shortcut
 	if (words.length <= 1) {
+		// Explicit path-like prefix → files only (no subcommand noise)
+		if (looksLikePath(current)) {
+			const files = listFiles(current);
+			if (files.length) process.stdout.write(files.join("\n") + "\n");
+			return;
+		}
+		// Subcommand prefix match — covers "rx <TAB>" (all) and "rx s<TAB>" → show/stats
 		const matches = [...SUBCOMMANDS].filter(s => s.startsWith(current));
-		if (matches.length) process.stdout.write(matches.join("\n") + "\n");
+		if (matches.length) {
+			process.stdout.write(matches.join("\n") + "\n");
+			return;
+		}
+		// Fallback: prefix doesn't match any subcommand, try filenames in pwd.
+		// Covers `rx data<TAB>` → data.rx without forcing the user to type `./`.
+		const files = listFiles(current);
+		if (files.length) process.stdout.write(files.join("\n") + "\n");
 		return;
 	}
 	const sub = words[0];
@@ -986,7 +927,6 @@ async function handleCompleteRequest(words: string[]): Promise<void> {
 const FLAGS_BY_SUB: Record<string, string[]> = {
 	show: ["-f", "--format", "-w", "--width", "-c", "--color", "--no-color", "-o", "--output", "-h", "--help"],
 	convert: ["--from", "--to", "--tune-index-threshold", "--tune-chain-threshold", "--tune-chain-delimiter", "--tune-dedup-limit", "-h", "--help"],
-	get: ["-f", "--format", "-w", "--width", "-c", "--color", "--no-color", "-o", "--output", "-h", "--help"],
 	inspect: ["-o", "--output", "--no-color", "-h", "--help"],
 	stats: ["-h", "--help"],
 	demo: ["-h", "--help"],
@@ -995,6 +935,13 @@ const FLAGS_BY_SUB: Record<string, string[]> = {
 };
 
 const DATA_EXTENSIONS = [".json", ".rx", ".rxb"];
+
+function looksLikePath(s: string): boolean {
+	if (s === "." || s === ".." || s === "~") return true;
+	if (s.startsWith("./") || s.startsWith("../") || s.startsWith("~/")) return true;
+	if (s.startsWith("/")) return true;
+	return false;
+}
 
 function listFiles(prefix: string): string[] {
 	const home = homedir();
@@ -1028,13 +975,12 @@ function helpTop(): string {
 ${tH1}rx${tR} — convert, inspect, and query compact JSON-shaped data.
 
 ${tH2}USAGE${tR}
-  ${tCmd}rx${tR} ${tArg}FILE${tR}                           ${tDesc}# Pretty-print FILE (default action)${tR}
+  ${tCmd}rx${tR} ${tArg}FILE${tR} [${tArg}SEGMENT${tR}...]              ${tDesc}# Pretty-print FILE or value at path (default action)${tR}
   ${tCmd}rx${tR} [${tArg}COMMAND${tR}] [${tArg}ARGS${tR}...]
 
 ${tH2}COMMANDS${tR}
-  ${tCmd}show${tR}      Pretty-print a file
+  ${tCmd}show${tR}      Pretty-print a file or a value at a path
   ${tCmd}convert${tR}   Convert between JSON, rx, and rxb
-  ${tCmd}get${tR}       Extract a value at a path
   ${tCmd}help${tR}      Show help for a command (${tCmd}rx help${tR} ${tArg}COMMAND${tR})
 
 ${tH2}FORMATS${tR}
@@ -1051,10 +997,10 @@ ${tH2}ENVIRONMENT${tR}
   ${tArg}NO_COLOR${tR}                          Disable ANSI color when set
 
 ${tH2}EXAMPLES${tR}
-  ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}# Pretty-print${tR}
+  ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}# Pretty-print whole file${tR}
+  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tArg}name${tR}            ${tDesc}# Show value at data.users[0].name${tR}
   ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}                   ${tDesc}# From stdin${tR}
-  ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rx${tR}       ${tDesc}# Convert${tR}
-  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tArg}name${tR}         ${tDesc}# Extract a value${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rx${tR}       ${tDesc}# Convert formats${tR}
 
 Run ${tCmd}rx help${tR} ${tArg}COMMAND${tR} for details, or ${tCmd}rx help --all${tR} for advanced commands.
 `;
@@ -1075,7 +1021,7 @@ function runHelp(argv: string[]): void {
 	const topic = argv[0];
 	if (topic === "--all" || topic === "-a") { process.stdout.write(helpAll()); return; }
 	const helps: Record<string, () => string> = {
-		show: helpShow, convert: helpConvert, get: helpGet,
+		show: helpShow, convert: helpConvert,
 		inspect: helpInspect, stats: helpStats, demo: helpDemo,
 		completions: helpCompletions, help: () => helpTop(),
 	};
@@ -1099,6 +1045,21 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	// Backwards-compat shim for shell completion scripts installed by
+	// rx <= 0.8.x, which invoke `rx --completions -- <words>`. New scripts
+	// installed by 0.9+ use `rx completions --complete -- <words>`.
+	if (first === "--completions") {
+		const sub = argv[1];
+		if (sub === "zsh" || sub === "bash") {
+			process.stdout.write((sub === "zsh" ? ZSH_COMPLETION : BASH_COMPLETION) + "\n");
+			return;
+		}
+		const dashDash = argv.indexOf("--");
+		const words = dashDash >= 0 ? argv.slice(dashDash + 1) : [];
+		await handleCompleteRequest(words);
+		return;
+	}
+
 	// Global --help / -h → top-level help
 	if (first === "-h" || first === "--help") {
 		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
@@ -1109,7 +1070,6 @@ async function main(): Promise<void> {
 	// Explicit subcommand
 	if (first === "show") return runShow(argv.slice(1));
 	if (first === "convert") return runConvert(argv.slice(1));
-	if (first === "get") return runGet(argv.slice(1));
 	if (first === "help") {
 		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
 		return runHelp(argv.slice(1));
