@@ -1,25 +1,25 @@
 import {
 	stringify, encode,
 	tune,
-	INDEX_THRESHOLD, STRING_CHAIN_THRESHOLD, STRING_CHAIN_DELIMITER, DEDUP_COMPLEXITY_LIMIT
+	INDEX_THRESHOLD, STRING_CHAIN_THRESHOLD, STRING_CHAIN_DELIMITER, DEDUP_COMPLEXITY_LIMIT,
 } from "./rx.ts";
 import {
 	open, inspect,
 	makeCursor, read,
 } from "./rx-read.ts";
 import { encode as rxbEncode } from "./rxb.ts";
-import {
-	open as rxbOpen,
-	makeCursor as rxbMakeCursor, read as rxbRead,
-} from "./rxb-read.ts";
+import { open as rxbOpen } from "./rxb-read.ts";
 import { readdirSync } from "node:fs";
 import { readFile, writeFile, mkdir, unlink, lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, basename, extname } from "node:path";
+import pkg from "./package.json" with { type: "json" };
 
-// ── Theme ────────────────────────────────────────────────────
-// Semantic color tags — interpolate directly in template strings.
-// Monochrome (default), 16-color, or 256-color picked by applyTheme().
+const VERSION = pkg.version;
+
+// ── Theme ────────────────────────────────────────────────────────────────────
+// Semantic color tags interpolated into template strings.
+// Reset to empty when color is off.
 
 let tStr = "", tNum = "", tBool = "", tNull = "", tKey = "";
 let tCmd = "", tArg = "", tDesc = "", tH1 = "", tH2 = "", tDim = "", tR = "";
@@ -33,212 +33,66 @@ function applyTheme(color: boolean) {
 	const term = process.env.TERM ?? "";
 	const ct = process.env.COLORTERM ?? "";
 	const rich = term.includes("256color") || ct === "truecolor" || ct === "24bit";
-
 	if (rich) {
-		// 256-color — Tokyo Night inspired
-		tStr = "\x1b[38;5;150m";  // #9ece6a soft green
-		tNum = "\x1b[38;5;209m";  // #ff9e64 orange
-		tBool = "\x1b[38;5;141m";  // #bb9af7 purple
-		tNull = "\x1b[38;5;60m";   // #565f89 blue-gray
-		tKey = "\x1b[38;5;39m";   // #08f bright azure
-		tCmd = "\x1b[38;5;117m";  // #75bffa light blue
-		tArg = "\x1b[38;5;179m";  // #eeb260 warm gold
-		tDesc = "\x1b[38;5;146m"; // #a9b1d6 muted lavender-gray
-		tH1 = "\x1b[1;38;5;189m"; // #c0caf5 bold periwinkle
-		tH2 = "\x1b[4m";         // underline
-		tDim = "\x1b[38;5;60m";   // #565f89 blue-gray
+		tStr = "\x1b[38;5;150m";  tNum = "\x1b[38;5;209m"; tBool = "\x1b[38;5;141m";
+		tNull = "\x1b[38;5;60m";  tKey = "\x1b[38;5;39m";  tCmd = "\x1b[38;5;117m";
+		tArg = "\x1b[38;5;179m";  tDesc = "\x1b[38;5;146m"; tH1 = "\x1b[1;38;5;189m";
+		tH2 = "\x1b[4m";          tDim = "\x1b[38;5;60m";
 	} else {
-		// 16-color fallback
-		tStr = "\x1b[32m";   // green
-		tNum = "\x1b[33m";   // yellow
-		tBool = "\x1b[33m";   // yellow
-		tNull = "\x1b[90m";   // bright black
-		tKey = "\x1b[35m";   // magenta
-		tCmd = "\x1b[34;1m"; // bright blue
-		tArg = "\x1b[33m";   // yellow
-		tDesc = "\x1b[37m";  // white
-		tH1 = "\x1b[1;37m";  // bold white
-		tH2 = "\x1b[4m";    // underline
-		tDim = "\x1b[2m";
+		tStr = "\x1b[32m";  tNum = "\x1b[33m";  tBool = "\x1b[33m";
+		tNull = "\x1b[90m"; tKey = "\x1b[35m";  tCmd = "\x1b[34;1m";
+		tArg = "\x1b[33m";  tDesc = "\x1b[37m"; tH1 = "\x1b[1;37m";
+		tH2 = "\x1b[4m";    tDim = "\x1b[2m";
 	}
 	tR = "\x1b[0m";
 }
 
-// ── Types & arg parsing ──────────────────────────────────────
+// ── Formats & detection ──────────────────────────────────────────────────────
 
-type Format = "json" | "rexc" | "rxb";
-type OutputFormat = "json" | "rexc" | "rxb" | "tree" | "ast" | "other";
+type Format = "json" | "rx" | "rxb";
+type OutputFormat = Format | "tree";
 
-type RxOptions = {
-	files: string[];
-	toFormat?: OutputFormat;
-	select?: string[];
-	out?: string;
-	write: boolean;
-	color: boolean;
-	help: boolean;
-	indexThreshold?: number;
-	stringChainThreshold?: number;
-	stringChainDelimiter?: string;
-	dedupComplexityLimit?: number;
-};
-
-function parseArgs(argv: string[]): RxOptions {
-	const opts: RxOptions = {
-		files: [],
-		write: false,
-		color: process.stdout.isTTY ?? false,
-		help: false,
-	};
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i]!;
-		if (arg === "-h" || arg === "--help") { opts.help = true; continue; }
-		if (arg === "-c" || arg === "--color") { opts.color = true; continue; }
-		if (arg === "--no-color") { opts.color = false; continue; }
-		if (arg === "-w" || arg === "--write") { opts.write = true; continue; }
-		if (arg === "-j" || arg === "--json") { opts.toFormat = "json"; continue; }
-		if (arg === "-r" || arg === "--rexc") { opts.toFormat = "rexc"; continue; }
-		if (arg === "-b" || arg === "--rxb") { opts.toFormat = "rxb"; continue; }
-		if (arg === "-t" || arg === "--tree") { opts.toFormat = "tree"; continue; }
-		if (arg === "-a" || arg === "--ast") { opts.toFormat = "ast"; continue; }
-		if (arg === "--to") {
-			const v = argv[++i];
-			if (v !== "json" && v !== "rexc" && v !== "rxb" && v !== "tree" && v !== "ast") throw new Error("--to must be 'json', 'rexc', 'rxb', 'tree', or 'ast'");
-			opts.toFormat = v;
-			continue;
-		}
-		if (arg === "-s" || arg === "--select") {
-			const segments: string[] = [];
-			while (i + 1 < argv.length && !argv[i + 1]!.startsWith("-")) {
-				segments.push(argv[++i]!);
-			}
-			if (segments.length === 0) throw new Error("Missing value for --select");
-			opts.select = segments;
-			continue;
-		}
-		if (arg === "-o" || arg === "--out") {
-			const v = argv[++i];
-			if (!v) throw new Error("Missing value for --out");
-			opts.out = v;
-			continue;
-		}
-		if (arg === "--index-threshold") {
-			const v = argv[++i];
-			if (!v) throw new Error("Missing value for --index-threshold");
-			const n = Number(v);
-			if (!Number.isInteger(n) || n < 0) throw new Error("--index-threshold must be a non-negative integer");
-			opts.indexThreshold = n;
-			continue;
-		}
-		if (arg === "--string-chain-threshold") {
-			const v = argv[++i];
-			if (!v) throw new Error("Missing value for --string-chain-threshold");
-			const n = Number(v);
-			if (!Number.isInteger(n) || n < 0) throw new Error("--string-chain-threshold must be a non-negative integer");
-			opts.stringChainThreshold = n;
-			continue;
-		}
-		if (arg === "--string-chain-delimiter") {
-			const v = argv[++i];
-			if (v === undefined) throw new Error("Missing value for --string-chain-delimiter");
-			opts.stringChainDelimiter = v;
-			continue;
-		}
-		if (arg === "--dedup-complexity-limit") {
-			const v = argv[++i];
-			if (!v) throw new Error("Missing value for --dedup-complexity-limit");
-			const n = Number(v);
-			if (!Number.isInteger(n) || n < 0) throw new Error("--dedup-complexity-limit must be a non-negative integer");
-			opts.dedupComplexityLimit = n;
-			continue;
-		}
-if (!arg.startsWith("-") || arg === "-") {
-			opts.files.push(arg);
-			continue;
-		}
-		throw new Error(`Unknown option: ${arg}`);
-	}
-	return opts;
-}
-
-function usage(): string {
-	return [
-		"",
-		`${tH1}rx${tR} — inspect, convert, and filter REXC & JSON data.`,
-		"",
-		`${tH2}Usage:${tR}`,
-		`  ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}Pretty-print as a tree${tR}`,
-		`  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tCmd}-j${tR}                      ${tDesc}Convert to JSON${tR}`,
-		`  ${tCmd}rx${tR} ${tArg}data.json${tR} ${tCmd}-r${tR}                    ${tDesc}Convert to REXC${tR}`,
-		`  ${tCmd}rx${tR} ${tArg}data.json${tR} ${tCmd}-b${tR}                    ${tDesc}Convert to RXB (binary)${tR}`,
-		`  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}                   ${tDesc}Read from stdin (auto-detect)${tR}`,
-		`  ${tCmd}rx${tR} ${tArg}data.rx${tR} ${tCmd}-s${tR} ${tArg}key 0 sub${tR}            ${tDesc}Select a sub-value${tR}`,
-		"",
-		`${tH2}Input:${tR}`,
-		`  ${tArg}<file>${tR}                             ${tDesc}File (format auto-detected by contents)${tR}`,
-		`  ${tCmd}-${tR}                                  ${tDesc}Read from stdin explicitly${tR}`,
-		`  ${tDim}(no args, piped)${tR}                   ${tDesc}Read from stdin automatically${tR}`,
-		"",
-		`${tH2}Format:${tR}`,
-		`  ${tCmd}-j${tR}, ${tCmd}--json${tR}                         ${tDesc}Output as JSON${tR}`,
-		`  ${tCmd}-r${tR}, ${tCmd}--rexc${tR}                         ${tDesc}Output as REXC${tR}`,
-		`  ${tCmd}-b${tR}, ${tCmd}--rxb${tR}                          ${tDesc}Output as RXB (binary)${tR}`,
-		`  ${tCmd}-t${tR}, ${tCmd}--tree${tR}                         ${tDesc}Output as tree (default on TTY)${tR}`,
-		`  ${tCmd}-a${tR}, ${tCmd}--ast${tR}                          ${tDesc}Output encoding structure as JSON${tR}`,
-		"",
-		`${tH2}Filtering:${tR}`,
-		`  ${tCmd}-s${tR}, ${tCmd}--select${tR} ${tArg}<seg>...${tR}              ${tDesc}Select a sub-value (e.g. ${tCmd}-s${tR} ${tArg}foo bar 0 baz${tR}${tDesc})${tR}`,
-		"",
-		`${tH2}Convert:${tR}`,
-		`  ${tCmd}-w${tR}, ${tCmd}--write${tR}                        ${tDesc}Write converted file (.json↔.rx)${tR}`,
-		"",
-		`${tH2}Output:${tR}`,
-		`  ${tCmd}-o${tR}, ${tCmd}--out${tR} ${tArg}<path>${tR}                   ${tDesc}Write to file instead of stdout${tR}`,
-		`  ${tCmd}-c${tR}, ${tCmd}--color${tR} / ${tCmd}--no-color${tR}           ${tDesc}Force or disable ANSI color${tR}`,
-		`  ${tCmd}-h${tR}, ${tCmd}--help${tR}                         ${tDesc}Show this message${tR}`,
-		"",
-		`${tH2}Tuning:${tR}`,
-		`  ${tCmd}--index-threshold${tR} ${tArg}<n>${tR}              ${tDesc}Index objects/arrays above n values${tR} ${tDim}(default: ${INDEX_THRESHOLD})${tR}`,
-		`  ${tCmd}--string-chain-threshold${tR} ${tArg}<n>${tR}       ${tDesc}Split strings longer than n into chains${tR} ${tDim}(default: ${STRING_CHAIN_THRESHOLD})${tR}`,
-		`  ${tCmd}--string-chain-delimiter${tR} ${tArg}<s>${tR}       ${tDesc}Delimiter for string chains${tR} ${tDim}(default: ${STRING_CHAIN_DELIMITER})${tR}`,
-		`  ${tCmd}--dedup-complexity-limit${tR} ${tArg}<n>${tR}      ${tDesc}Max node count for structural dedup${tR} ${tDim}(default: ${DEDUP_COMPLEXITY_LIMIT})${tR}`,
-		"",
-		`${tH2}Shell completions:${tR}`,
-		`  ${tCmd}rx --completions setup${tR} ${tArg}[zsh|bash]${tR}  ${tDesc}Install tab completions${tR}`,
-		`  ${tCmd}rx --completions${tR} ${tArg}zsh|bash${tR}          ${tDesc}Print completion script to stdout${tR}`,
-		""
-	].join("\n");
-}
-
-// ── Format detection & input reading ─────────────────────────
+const VALID_FORMATS: readonly OutputFormat[] = ["json", "rx", "rxb", "tree"] as const;
 
 function formatFromExt(path: string): Format | undefined {
 	if (path.endsWith(".json")) return "json";
-	if (path.endsWith(".rexc") || path.endsWith(".rx")) return "rexc";
+	if (path.endsWith(".rx")) return "rx";
 	if (path.endsWith(".rxb")) return "rxb";
 	return undefined;
 }
 
-function detectFormat(content: string): Format {
-	const bytes = new TextEncoder().encode(content.trim());
-	if (bytes.length === 0) return "rexc";
+// Content-based format detection for stdin / unknown extensions.
+function detectFormat(bytes: Uint8Array): Format {
+	if (bytes.length === 0) return "rx";
+	// rxb starts with a tag byte < 0x20 (control range) that JSON/rx never produce as first byte.
+	const first = bytes[0]!;
+	if (first < 0x20 && first !== 0x09 && first !== 0x0a && first !== 0x0d) return "rxb";
+	// Try parsing as rx; if it consumes all bytes, it's rx.
 	try {
-		const c = makeCursor(bytes);
+		const trimmed = trimWhitespace(bytes);
+		const c = makeCursor(trimmed);
 		read(c);
-		if (c.left === 0) return "rexc";
-	} catch { /* not valid rexc */ }
+		if (c.left === 0) return "rx";
+	} catch { /* not rx */ }
 	return "json";
 }
 
-async function readStdin(): Promise<string> {
+function trimWhitespace(bytes: Uint8Array): Uint8Array {
+	let start = 0, end = bytes.length;
+	while (start < end && (bytes[start]! === 0x20 || bytes[start]! === 0x09 || bytes[start]! === 0x0a || bytes[start]! === 0x0d)) start++;
+	while (end > start && (bytes[end - 1]! === 0x20 || bytes[end - 1]! === 0x09 || bytes[end - 1]! === 0x0a || bytes[end - 1]! === 0x0d)) end--;
+	return start === 0 && end === bytes.length ? bytes : bytes.subarray(start, end);
+}
+
+// ── Input reading ────────────────────────────────────────────────────────────
+
+async function readStdinBytes(): Promise<Uint8Array> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of process.stdin) {
 		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 	}
-	return Buffer.concat(chunks).toString("utf8");
+	return new Uint8Array(Buffer.concat(chunks));
 }
-
-type ParsedInput = { value: unknown; rexcBytes?: Uint8Array; rxbBytes?: Uint8Array };
 
 function stripJsonComments(s: string): string {
 	let out = "", i = 0;
@@ -248,11 +102,9 @@ function stripJsonComments(s: string): string {
 			while (i < s.length && s[i] !== '"') { if (s[i] === '\\') i++; i++; }
 			out += s.slice(start, ++i);
 		} else if (s[i] === '/' && s[i + 1] === '/') {
-			i += 2;
-			while (i < s.length && s[i] !== '\n') i++;
+			i += 2; while (i < s.length && s[i] !== '\n') i++;
 		} else if (s[i] === '/' && s[i + 1] === '*') {
-			i += 2;
-			while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
+			i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
 			i += 2;
 		} else {
 			out += s[i++];
@@ -261,95 +113,38 @@ function stripJsonComments(s: string): string {
 	return out;
 }
 
-function parseRawBytes(bytes: Uint8Array, format: Format): ParsedInput {
-	if (format === "rxb") return { value: rxbOpen(bytes), rxbBytes: bytes };
-	const raw = new TextDecoder().decode(bytes);
-	if (format === "json") return { value: JSON.parse(stripJsonComments(raw)) };
-	const trimmed = new TextEncoder().encode(raw.trim());
-	return { value: open(trimmed), rexcBytes: trimmed };
-}
+type ParsedInput = {
+	value: unknown;
+	inputFormat: Format;
+	rxBytes?: Uint8Array;   // present when input was rx
+	rxbBytes?: Uint8Array;  // present when input was rxb
+};
 
-function parseRaw(raw: string, format: Format): ParsedInput {
-	if (format === "json") return { value: JSON.parse(stripJsonComments(raw)) };
-	const bytes = new TextEncoder().encode(raw.trim());
-	return { value: open(bytes), rexcBytes: bytes };
-}
-
-async function readOne(file: string): Promise<ParsedInput> {
-	const ext = file === "-" ? undefined : formatFromExt(file);
-	if (ext === "rxb") {
-		const bytes = new Uint8Array(await readFile(file));
-		return parseRawBytes(bytes, "rxb");
+function parseBytes(bytes: Uint8Array, format: Format): ParsedInput {
+	if (format === "rxb") return { value: rxbOpen(bytes), inputFormat: "rxb", rxbBytes: bytes };
+	if (format === "rx") {
+		const trimmed = trimWhitespace(bytes);
+		return { value: open(trimmed), inputFormat: "rx", rxBytes: trimmed };
 	}
-	const raw = file === "-" ? await readStdin() : await readFile(file, "utf8");
-	const format = file === "-" ? detectFormat(raw) : ext ?? detectFormat(raw);
-	return parseRaw(raw, format);
+	const text = new TextDecoder().decode(bytes);
+	return { value: JSON.parse(stripJsonComments(text)), inputFormat: "json" };
 }
 
-async function readInput(opts: RxOptions): Promise<ParsedInput> {
-	if (opts.files.length === 0) {
-		if (process.stdin.isTTY) {
-			process.stderr.write([
-				`${tH1}rx${tR} — inspect, convert, and filter REXC & JSON data.`,
-				"",
-				`${tH2}Usage:${tR} (file can be .json, .rx, or .rxb)`,
-				`  ${tCmd}rx${tR} ${tArg}<file>${tR}                Pretty-print as a tree`,
-				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-j${tR}             Convert to JSON`,
-				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-r${tR}             Convert to REXC`,
-				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-b${tR}             Convert to RXB (binary)`,
-				`  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}         Read from stdin`,
-				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-s${tR} ${tArg}key 0 sub${tR}   Select a sub-value`,
-				`  ${tCmd}rx${tR} ${tArg}<file>${tR} ${tCmd}-o${tR} ${tArg}out.json${tR}    Write to file`,
-				"",
-				`Run ${tCmd}rx --help${tR} for full options.`,
-				"",
-			].join("\n"));
-			process.exit(1);
-		}
-		const raw = await readStdin();
-		if (!raw.trim()) throw new Error("Empty stdin.");
-		return parseRaw(raw, detectFormat(raw));
+// Read and parse a single source. `source` is a file path or "-" for stdin.
+// `forcedFormat` overrides ext/content detection.
+async function readSource(source: string, forcedFormat?: Format): Promise<ParsedInput> {
+	let bytes: Uint8Array;
+	if (source === "-") {
+		bytes = await readStdinBytes();
+		if (bytes.length === 0) throw new Error("stdin is empty");
+	} else {
+		bytes = new Uint8Array(await readFile(source));
 	}
-
-	if (opts.files.length === 1) return readOne(opts.files[0]!);
-
-	const values: unknown[] = [];
-	for (const file of opts.files) values.push((await readOne(file)).value);
-	return { value: values };
+	const format = forcedFormat ?? (source === "-" ? detectFormat(bytes) : formatFromExt(source) ?? detectFormat(bytes));
+	return parseBytes(bytes, format);
 }
 
-// ── Selector ─────────────────────────────────────────────────
-
-function applySelector(value: unknown, segments: string[]): unknown {
-	let current = value;
-	let path = "";
-	for (const seg of segments) {
-		const idx = /^\d+$/.test(seg) ? parseInt(seg, 10) : undefined;
-		if (Array.isArray(current) && idx !== undefined) {
-			path += `[${idx}]`;
-			if (idx < 0 || idx >= current.length) {
-				throw new Error(`Selector ${path}: index ${idx} out of range (length ${current.length})`);
-			}
-			current = current[idx];
-		} else if (isObj(current)) {
-			path += `.${seg}`;
-			if (!(seg in current)) throw new Error(`Selector${path}: property '${seg}' not found`);
-			current = current[seg];
-		} else {
-			throw new Error(`Selector${path}.${seg}: cannot index into ${typeLabel(current)}`);
-		}
-	}
-	return current;
-}
-
-function typeLabel(v: unknown): string {
-	if (v === null) return "null";
-	if (Array.isArray(v)) return "array";
-	return typeof v;
-}
-
-// ── Tree pretty-printer ──────────────────────────────────────
-// Rex-style: bare keys, space-separated arrays, inline-first
+// ── Tree pretty-printer ──────────────────────────────────────────────────────
 
 function isObj(v: unknown): v is Record<string, unknown> {
 	if (!v || typeof v !== "object" || Array.isArray(v)) return false;
@@ -398,10 +193,8 @@ function fmtInline(v: unknown): string {
 function fmtPretty(v: unknown, depth: number, ind: number, maxW: number): string {
 	if (v === undefined || v === null || typeof v !== "object") return fmtInline(v);
 	const budget = maxW - depth * ind;
-
 	if (Array.isArray(v)) {
 		if (v.length === 0) return "[]";
-		// try inline (bail on nested objects/arrays)
 		let s = "[ ", ok = true;
 		for (let i = 0; i < v.length; i++) {
 			if (typeof v[i] === "object" && v[i] !== null) { ok = false; break; }
@@ -417,7 +210,6 @@ function fmtPretty(v: unknown, depth: number, ind: number, maxW: number): string
 		}
 		return r + "\n" + pad + "]";
 	}
-
 	if (isObj(v)) {
 		const ks = Object.keys(v);
 		if (ks.length === 0) return "{}";
@@ -438,37 +230,30 @@ function fmtPretty(v: unknown, depth: number, ind: number, maxW: number): string
 		}
 		return r + "\n" + pad + "}";
 	}
-
 	return fmtInline(v);
 }
 
-function treeStringify(value: unknown, onLine?: (line: string) => void): string {
-	const text = fmtPretty(value, 0, 2, 80);
-	if (onLine) { for (const line of text.split("\n")) onLine(line); return ""; }
-	return text;
+function treeStringify(value: unknown, width: number): string {
+	return fmtPretty(value, 0, 2, width);
 }
 
-// ── Syntax highlighting ──────────────────────────────────────
+// ── Syntax highlighting ──────────────────────────────────────────────────────
 
 function highlightTree(line: string): string {
 	let result = "", i = 0;
 	const len = line.length;
 	while (i < len) {
 		if (line[i] === " " || line[i] === "\t") { result += line[i]; i++; continue; }
-		// key followed by ':'
 		const km = line.slice(i).match(/^([A-Za-z_][A-Za-z0-9_-]*|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|"(?:[^"\\]|\\.)*")(\s*:)/);
 		if (km) { result += tKey + km[1] + tR + km[2]; i += km[0].length; continue; }
-		// string
 		if (line[i] === '"') {
 			const m = line.slice(i).match(/^"(?:[^"\\]|\\.)*"/);
 			if (m) { result += tStr + m[0] + tR; i += m[0].length; continue; }
 		}
-		// keywords
 		const bl = line.slice(i).match(/^(?:true|false)\b/);
 		if (bl) { result += tBool + bl[0] + tR; i += bl[0].length; continue; }
 		const nl = line.slice(i).match(/^(?:null|undefined|nan|-?inf)\b/);
 		if (nl) { result += tNull + nl[0] + tR; i += nl[0].length; continue; }
-		// numbers
 		const nm = line.slice(i).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?=[\s\]\}]|$)/);
 		if (nm) { result += tNum + nm[0] + tR; i += nm[0].length; continue; }
 		result += line[i]; i++;
@@ -495,7 +280,7 @@ function highlightJSON(json: string): string {
 	return result + json.slice(last);
 }
 
-// ── Output formatting ────────────────────────────────────────
+// ── Output formatting ────────────────────────────────────────────────────────
 
 function normalizeForJson(value: unknown, inArray: boolean): unknown {
 	if (value === undefined) return inArray ? null : undefined;
@@ -510,228 +295,583 @@ function normalizeForJson(value: unknown, inArray: boolean): unknown {
 	return out;
 }
 
-function formatOutputBinary(value: unknown, format: OutputFormat): Uint8Array | null {
+// Render `value` in the requested format, returning bytes to write.
+function render(value: unknown, format: OutputFormat, color: boolean, width: number): Uint8Array {
 	if (format === "rxb") return rxbEncode(value);
-	return null;
-}
-
-function formatOutput(value: unknown, format: OutputFormat, color: boolean, rexcBytes?: Uint8Array): string {
-	if (format === "tree") {
-		const text = treeStringify(value);
-		if (!color) return text;
-		return text.split("\n").map(highlightTree).join("\n");
-	}
+	if (format === "rx") return new TextEncoder().encode(stringify(value) + "\n");
 	if (format === "json") {
 		const text = JSON.stringify(normalizeForJson(value, false), null, 2) ?? "null";
-		return color ? highlightJSON(text) : text;
+		return new TextEncoder().encode((color ? highlightJSON(text) : text) + "\n");
 	}
-	if (format === "ast") {
-		const bytes = rexcBytes ?? encode(value);
-		const ast = inspect(bytes);
-		const text = JSON.stringify(ast, null, 2);
-		return color ? highlightJSON(text) : text;
-	}
-	if (format === "rexc") {
-		return stringify(value) ?? "";
-	}
-	throw new Error(`Unsupported output format: ${format}`);
+	// tree
+	const text = treeStringify(value, width);
+	const finalText = color ? text.split("\n").map(highlightTree).join("\n") : text;
+	return new TextEncoder().encode(finalText + "\n");
 }
 
-// ── Shell completions ────────────────────────────────────────
+// ── Output format resolution ─────────────────────────────────────────────────
+// Priority: explicit --format / -f > RX_FORMAT env > TTY default (tree/json).
 
-const FLAGS_WITH_VALUE = new Set(["-o", "--out", "--to", "--index-threshold", "--string-chain-threshold", "--string-chain-delimiter", "--dedup-complexity-limit"]);
-const ALL_FLAGS = ["-h", "--help", "-w", "--write", "-j", "--json", "-r", "--rexc", "-b", "--rxb", "-t", "--tree", "-a", "--ast",
-	"--to", "-s", "--select", "-o", "--out", "-c", "--color", "--no-color",
-	"--index-threshold", "--string-chain-threshold", "--string-chain-delimiter", "--dedup-complexity-limit"];
-const DATA_EXTENSIONS = [".json", ".rexc", ".rx", ".rxb"];
-
-function findSelectIndex(words: string[]): number {
-	for (let i = 0; i < words.length - 1; i++) {
-		const w = words[i]!;
-		if (w === "-s" || w === "--select") return i;
-		if (FLAGS_WITH_VALUE.has(w)) { i++; continue; }
-	}
-	return -1;
-}
-
-function extractFiles(words: string[]): string[] {
-	const files: string[] = [];
-	for (let i = 0; i < words.length; i++) {
-		const w = words[i]!;
-		if (w === "-s" || w === "--select") break;
-		if (FLAGS_WITH_VALUE.has(w)) { i++; continue; }
-		if (w.startsWith("-")) continue;
-		files.push(w);
-	}
-	return files;
-}
-
-function shellUnescape(s: string): string { return s.replace(/\\(.)/g, "$1"); }
-function shellEscape(s: string): string { return s.replace(/([ ()\[\]{}'"\\!#$&*?;<>|`^~])/g, "\\$1"); }
-
-function listFiles(prefix: string, dataOnly: boolean): string[] {
-	prefix = shellUnescape(prefix);
-	const home = homedir();
-	// Normalize expanded home dir back to ~ (bun may expand ~ in argv)
-	if (prefix === home) return ["~/"];
-	if (prefix.startsWith(home + "/")) prefix = "~/" + prefix.slice(home.length + 1);
-	if (prefix === "~") return ["~/"];
-	const tildePrefix = prefix.startsWith("~/");
-	if (tildePrefix) {
-		const rest = prefix.slice(2);
-		prefix = rest ? join(home, rest) : home + "/";
-	}
-	let dir: string, partial: string;
-	if (prefix.endsWith("/")) {
-		dir = prefix.slice(0, -1);
-		partial = "";
-	} else if (prefix.includes("/")) {
-		dir = dirname(prefix);
-		partial = basename(prefix);
-	} else {
-		dir = ".";
-		partial = prefix;
-	}
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-		const results: string[] = [];
-		// readdirSync omits . and .., so offer them as navigation targets
-		if (!prefix.includes("/")) {
-			if (".".startsWith(partial)) results.push("./");
-			if ("..".startsWith(partial)) results.push("../");
+function resolveOutputFormat(flag: OutputFormat | undefined, isTTY: boolean): OutputFormat {
+	if (flag) return flag;
+	const env = process.env.RX_FORMAT;
+	if (env) {
+		if (!VALID_FORMATS.includes(env as OutputFormat)) {
+			throw new Error(`RX_FORMAT=${env} not recognized (expected one of: ${VALID_FORMATS.join(", ")})`);
 		}
-		for (const entry of entries) {
-			if (!entry.name.startsWith(partial)) continue;
-			if (entry.name.startsWith(".") && !partial.startsWith(".")) continue;
-			let rel = dir === "." ? entry.name : join(dir, entry.name);
-			const escaped = tildePrefix
-				? "~/" + shellEscape(rel.slice(home.length + 1))
-				: shellEscape(rel);
-			if (entry.isDirectory()) {
-				results.push(escaped + "/");
-			} else if (!dataOnly || DATA_EXTENSIONS.some(ext => entry.name.endsWith(ext))) {
-				results.push(escaped);
-			}
+		return env as OutputFormat;
+	}
+	return isTTY ? "tree" : "json";
+}
+
+// Priority: --no-color > --color > NO_COLOR env > TTY.
+function resolveColor(flag: boolean | undefined, isTTY: boolean): boolean {
+	if (flag !== undefined) return flag;
+	if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "") return false;
+	return isTTY;
+}
+
+// ── Error helpers ────────────────────────────────────────────────────────────
+
+class CliError extends Error {
+	constructor(public subcmd: string, message: string, public suggestion?: string) {
+		super(message);
+	}
+}
+
+function fail(subcmd: string, message: string, suggestion?: string): never {
+	throw new CliError(subcmd, message, suggestion);
+}
+
+// Levenshtein distance for subcommand/option typo suggestion
+function editDistance(a: string, b: string): number {
+	const m = a.length, n = b.length;
+	if (m === 0) return n;
+	if (n === 0) return m;
+	const prev = new Array<number>(n + 1);
+	const curr = new Array<number>(n + 1);
+	for (let j = 0; j <= n; j++) prev[j] = j;
+	for (let i = 1; i <= m; i++) {
+		curr[0] = i;
+		for (let j = 1; j <= n; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			curr[j] = Math.min(curr[j - 1]! + 1, prev[j]! + 1, prev[j - 1]! + cost);
 		}
-		return results.sort();
-	} catch { return []; }
+		for (let j = 0; j <= n; j++) prev[j] = curr[j]!;
+	}
+	return prev[n]!;
 }
 
-function printCompletions(completions: string[]) {
-	if (completions.length > 0) process.stdout.write(completions.join("\n") + "\n");
+function suggest(word: string, candidates: readonly string[]): string | undefined {
+	let best: string | undefined, bestDist = Infinity;
+	for (const c of candidates) {
+		const d = editDistance(word, c);
+		if (d < bestDist && d <= Math.max(2, Math.floor(c.length / 3))) { best = c; bestDist = d; }
+	}
+	return best;
 }
 
-function walkSegments(value: unknown, segments: string[]): unknown {
-	let current = value;
+// ── Parse helpers shared by subcommand parsers ───────────────────────────────
+
+function parseFormatFlag(v: string | undefined, flag: string, subcmd: string): OutputFormat {
+	if (!v) fail(subcmd, `${flag} requires a value`, `example: ${flag} json`);
+	if (!VALID_FORMATS.includes(v as OutputFormat)) {
+		fail(subcmd, `${flag} value '${v}' not recognized`, `expected one of: ${VALID_FORMATS.join(" | ")}`);
+	}
+	return v as OutputFormat;
+}
+
+function parseInputFormatFlag(v: string | undefined, flag: string, subcmd: string): Format {
+	if (!v) fail(subcmd, `${flag} requires a value`, `example: ${flag} json`);
+	if (v !== "json" && v !== "rx" && v !== "rxb") {
+		fail(subcmd, `${flag} value '${v}' not recognized`, `expected one of: json | rx | rxb`);
+	}
+	return v;
+}
+
+function parseIntFlag(v: string | undefined, flag: string, subcmd: string): number {
+	if (!v) fail(subcmd, `${flag} requires a value`, `example: ${flag} 16`);
+	const n = Number(v);
+	if (!Number.isInteger(n) || n < 0) fail(subcmd, `${flag} must be a non-negative integer (got '${v}')`);
+	return n;
+}
+
+// ── Subcommand: show ─────────────────────────────────────────────────────────
+
+function helpShow(): string {
+	return `
+${tH1}rx show${tR} — pretty-print a file.
+
+${tH2}USAGE${tR}
+  ${tCmd}rx show${tR} [${tArg}FILE${tR} | ${tArg}-${tR}]
+  ${tCmd}rx${tR} ${tArg}FILE${tR}                            ${tDesc}# shortcut for ${tCmd}rx show FILE${tR}
+
+${tH2}ARGUMENTS${tR}
+  ${tArg}FILE${tR}                              Path to .json, .rx, or .rxb. Use ${tArg}-${tR} for stdin.
+                                    Format auto-detected by extension then by content.
+
+${tH2}OPTIONS${tR}
+  ${tCmd}-f${tR}, ${tCmd}--format${tR} ${tArg}FMT${tR}                  Output format: ${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
+  ${tCmd}-w${tR}, ${tCmd}--width${tR} ${tArg}N${tR}                     Target line width for tree output ${tDim}(default: 80)${tR}
+  ${tCmd}-c${tR}, ${tCmd}--color${tR}                         Force ANSI color
+      ${tCmd}--no-color${tR}                      Disable color
+  ${tCmd}-o${tR}, ${tCmd}--output${tR} ${tArg}PATH${tR}                 Write to PATH instead of stdout
+  ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
+
+${tH2}DEFAULTS${tR}
+  Format: ${tArg}tree${tR} when stdout is a terminal, ${tArg}json${tR} when piped or redirected.
+          Override with ${tCmd}-f${tR} or set ${tArg}RX_FORMAT${tR} env var.
+  Color:  on when stdout is a terminal, off otherwise. ${tArg}NO_COLOR${tR} env disables.
+
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx show${tR} ${tArg}data.rx${tR}
+  ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}# same thing${tR}
+  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}                   ${tDesc}# from stdin${tR}
+  ${tCmd}rx show${tR} ${tArg}data.json${tR} ${tCmd}-f rx${tR}            ${tDesc}# JSON file displayed in rx text${tR}
+  ${tCmd}rx show${tR} ${tArg}data.rx${tR} ${tCmd}-w${tR} ${tArg}120${tR}             ${tDesc}# wider terminal layout${tR}
+  ${tCmd}rx show${tR} ${tArg}data.rx${tR} ${tCmd}--no-color${tR} ${tCmd}-o${tR} ${tArg}view.txt${tR}
+`;
+}
+
+type ShowOpts = {
+	file: string;
+	format?: OutputFormat;
+	width: number;
+	color?: boolean;
+	output?: string;
+};
+
+function parseShowArgs(argv: string[]): ShowOpts {
+	const opts: ShowOpts = { file: "", width: 80 };
+	let gotFile = false;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-h" || arg === "--help") { process.stdout.write(helpShow()); process.exit(0); }
+		if (arg === "-c" || arg === "--color") { opts.color = true; continue; }
+		if (arg === "--no-color") { opts.color = false; continue; }
+		if (arg === "-f" || arg === "--format") { opts.format = parseFormatFlag(argv[++i], arg, "show"); continue; }
+		if (arg === "-w" || arg === "--width") { opts.width = parseIntFlag(argv[++i], arg, "show"); continue; }
+		if (arg === "-o" || arg === "--output") {
+			const v = argv[++i]; if (!v) fail("show", `${arg} requires a value`, `example: ${arg} out.txt`);
+			opts.output = v; continue;
+		}
+		if (arg === "-") { if (gotFile) fail("show", "takes only one input"); opts.file = "-"; gotFile = true; continue; }
+		if (arg.startsWith("-")) fail("show", `unknown option: ${arg}`, `run 'rx show --help' for usage`);
+		if (gotFile) fail("show", "takes only one input", `for batch, use shell: for f in *.rx; do rx show "$f"; done`);
+		opts.file = arg; gotFile = true;
+	}
+	if (!gotFile) opts.file = process.stdin.isTTY ? "" : "-";
+	return opts;
+}
+
+async function runShow(argv: string[]): Promise<void> {
+	const opts = parseShowArgs(argv);
+	if (!opts.file) { process.stdout.write(helpShow()); process.exit(0); }
+	const isTTY = opts.output ? false : (process.stdout.isTTY ?? false);
+	const color = resolveColor(opts.color, isTTY);
+	const format = resolveOutputFormat(opts.format, isTTY);
+	applyTheme(color);
+	const parsed = await readSource(opts.file);
+	const bytes = render(parsed.value, format, color && format !== "rxb", opts.width);
+	if (opts.output) await writeFile(opts.output, bytes);
+	else process.stdout.write(bytes);
+}
+
+// ── Subcommand: convert ──────────────────────────────────────────────────────
+
+function helpConvert(): string {
+	return `
+${tH1}rx convert${tR} — convert between JSON, rx, and rxb formats.
+
+${tH2}USAGE${tR}
+  ${tCmd}rx convert${tR} ${tArg}SRC${tR} ${tArg}DST${tR}
+  ${tCmd}rx convert${tR} ${tArg}-${tR} ${tArg}DST${tR} [${tCmd}--from${tR} ${tArg}FMT${tR}]
+  ${tCmd}rx convert${tR} ${tArg}SRC${tR} ${tArg}-${tR} ${tCmd}--to${tR} ${tArg}FMT${tR}
+  ${tCmd}rx convert${tR} ${tArg}-${tR} ${tArg}-${tR} ${tCmd}--from${tR} ${tArg}FMT${tR} ${tCmd}--to${tR} ${tArg}FMT${tR}
+
+${tH2}ARGUMENTS${tR}
+  ${tArg}SRC${tR}                               Input path, or ${tArg}-${tR} for stdin
+  ${tArg}DST${tR}                               Output path, or ${tArg}-${tR} for stdout
+
+  Extension determines format: ${tArg}.json${tR}, ${tArg}.rx${tR}, ${tArg}.rxb${tR}.
+  When either side is ${tArg}-${tR}, pass ${tCmd}--from${tR} or ${tCmd}--to${tR} to set its format.
+  ${tCmd}--from${tR} may be omitted: stdin is content-detected.
+
+${tH2}OPTIONS${tR}
+  ${tCmd}--from${tR} ${tArg}FMT${tR}                       Input format: ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
+  ${tCmd}--to${tR} ${tArg}FMT${tR}                         Output format: ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
+  ${tCmd}--tune-index-threshold${tR} ${tArg}N${tR}         Index objects/arrays larger than N ${tDim}(default: ${INDEX_THRESHOLD})${tR}
+  ${tCmd}--tune-chain-threshold${tR} ${tArg}N${tR}         Split strings longer than N ${tDim}(default: ${STRING_CHAIN_THRESHOLD})${tR}
+  ${tCmd}--tune-chain-delimiter${tR} ${tArg}S${tR}         Delimiters for chain splitting ${tDim}(default: ${STRING_CHAIN_DELIMITER})${tR}
+  ${tCmd}--tune-dedup-limit${tR} ${tArg}N${tR}             Max node count for structural dedup ${tDim}(default: ${DEDUP_COMPLEXITY_LIMIT})${tR}
+  ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
+
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rx${tR}         ${tDesc}# JSON → rx${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rxb${tR}        ${tDesc}# JSON → rxb${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.rx${tR}   ${tArg}data.json${tR}       ${tDesc}# rx → JSON${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.rxb${tR}  ${tArg}data.json${tR}       ${tDesc}# rxb → JSON${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.rx${tR}   ${tArg}data.rxb${tR}        ${tDesc}# rx → rxb (re-encode)${tR}
+
+  ${tCmd}cat${tR} ${tArg}data.json${tR} | ${tCmd}rx convert${tR} ${tArg}-${tR} ${tArg}data.rx${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.rx${tR} ${tArg}-${tR} ${tCmd}--to${tR} ${tArg}json${tR} > ${tArg}data.json${tR}
+  ${tCmd}curl${tR} ${tArg}-s${tR} ${tArg}https://ex/api.json${tR} | ${tCmd}rx convert${tR} ${tArg}-${tR} ${tArg}snap.rxb${tR}
+
+  ${tCmd}rx convert${tR} ${tArg}big.json${tR} ${tArg}big.rxb${tR} ${tCmd}--tune-dedup-limit${tR} ${tArg}128${tR}
+`;
+}
+
+type ConvertOpts = {
+	src: string;
+	dst: string;
+	from?: Format;
+	to?: Format;
+	tuneIndex?: number;
+	tuneChain?: number;
+	tuneDelim?: string;
+	tuneDedup?: number;
+};
+
+function parseConvertArgs(argv: string[]): ConvertOpts {
+	const opts: ConvertOpts = { src: "", dst: "" };
+	const positional: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-h" || arg === "--help") { process.stdout.write(helpConvert()); process.exit(0); }
+		if (arg === "--from") { opts.from = parseInputFormatFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "--to") { opts.to = parseInputFormatFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "--tune-index-threshold") { opts.tuneIndex = parseIntFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "--tune-chain-threshold") { opts.tuneChain = parseIntFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "--tune-chain-delimiter") {
+			const v = argv[++i]; if (v === undefined) fail("convert", `${arg} requires a value`);
+			opts.tuneDelim = v; continue;
+		}
+		if (arg === "--tune-dedup-limit") { opts.tuneDedup = parseIntFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "-") { positional.push("-"); continue; }
+		if (arg.startsWith("-")) fail("convert", `unknown option: ${arg}`, `run 'rx convert --help' for usage`);
+		positional.push(arg);
+	}
+	if (positional.length !== 2) {
+		fail("convert", `expects 2 positional arguments (SRC and DST), got ${positional.length}`,
+			`example: rx convert in.json out.rx`);
+	}
+	opts.src = positional[0]!;
+	opts.dst = positional[1]!;
+	return opts;
+}
+
+async function runConvert(argv: string[]): Promise<void> {
+	const opts = parseConvertArgs(argv);
+
+	// Resolve input format
+	let inFmt = opts.from;
+	if (!inFmt && opts.src !== "-") inFmt = formatFromExt(opts.src);
+	if (!inFmt && opts.src !== "-") {
+		fail("convert", `cannot infer input format from '${opts.src}'`,
+			`pass --from json|rx|rxb or use a .json/.rx/.rxb extension`);
+	}
+	// (src === "-" and !inFmt): we'll content-detect inside readSource
+
+	// Resolve output format
+	let outFmt = opts.to;
+	if (!outFmt && opts.dst !== "-") outFmt = formatFromExt(opts.dst);
+	if (!outFmt) {
+		fail("convert", `cannot infer output format for '${opts.dst}'`,
+			`pass --to json|rx|rxb or use a .json/.rx/.rxb extension`);
+	}
+
+	tune({
+		indexThreshold: opts.tuneIndex,
+		stringChainThreshold: opts.tuneChain,
+		stringChainDelimiter: opts.tuneDelim,
+		dedupComplexityLimit: opts.tuneDedup,
+	});
+
+	const parsed = await readSource(opts.src, inFmt);
+	const bytes = render(parsed.value, outFmt, false, 80);
+	// render() adds a newline for text formats; for rxb and stdout-piped rx, that's fine.
+	// For file writes in rxb we want raw bytes:
+	const toWrite = outFmt === "rxb" ? rxbEncode(parsed.value) : bytes;
+	if (opts.dst === "-") process.stdout.write(toWrite);
+	else await writeFile(opts.dst, toWrite);
+}
+
+// ── Subcommand: get ──────────────────────────────────────────────────────────
+
+function helpGet(): string {
+	return `
+${tH1}rx get${tR} — extract a value at a path.
+
+${tH2}USAGE${tR}
+  ${tCmd}rx get${tR} ${tArg}FILE${tR} [${tArg}SEGMENT${tR}...]
+
+${tH2}ARGUMENTS${tR}
+  ${tArg}FILE${tR}                              Path to .json, .rx, or .rxb. Use ${tArg}-${tR} for stdin.
+  ${tArg}SEGMENT${tR}                           One key or numeric index per segment.
+                                    No segments = entire file.
+
+${tH2}OPTIONS${tR}
+  ${tCmd}-f${tR}, ${tCmd}--format${tR} ${tArg}FMT${tR}                  Output format: ${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
+  ${tCmd}-w${tR}, ${tCmd}--width${tR} ${tArg}N${tR}                     Target line width for tree output ${tDim}(default: 80)${tR}
+  ${tCmd}-c${tR}, ${tCmd}--color${tR}                         Force ANSI color
+      ${tCmd}--no-color${tR}                      Disable color
+  ${tCmd}-o${tR}, ${tCmd}--output${tR} ${tArg}PATH${tR}                 Write to PATH instead of stdout
+  ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
+
+${tH2}DEFAULTS${tR}
+  Format: ${tArg}tree${tR} when stdout is a terminal, ${tArg}json${tR} when piped or redirected.
+          Override with ${tCmd}-f${tR} or set ${tArg}RX_FORMAT${tR} env var.
+
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tArg}name${tR}           ${tDesc}# data.users[0].name${tR}
+  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}config${tR}              ${tDesc}# data.config subtree${tR}
+  ${tCmd}rx get${tR} ${tArg}data.rx${tR}                     ${tDesc}# whole file${tR}
+  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tCmd}-f${tR} ${tArg}rx${tR}        ${tDesc}# emit subtree as rx${tR}
+  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx get${tR} ${tArg}-${tR} ${tArg}foo${tR} ${tArg}bar${tR}       ${tDesc}# from stdin${tR}
+  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tCmd}-f${tR} ${tArg}json${tR} | ${tCmd}jq${tR} ${tArg}length${tR}
+
+${tH2}ERRORS${tR}
+  ${tDim}rx get: path [users, 999] — index 999 out of range in 5-element array${tR}
+  ${tDim}rx get: path [config, db] — 'db' not found in object at [config]${tR}
+  ${tDim}rx get: path [count] — cannot index into number at []${tR}
+`;
+}
+
+type GetOpts = {
+	file: string;
+	segments: string[];
+	format?: OutputFormat;
+	width: number;
+	color?: boolean;
+	output?: string;
+};
+
+function parseGetArgs(argv: string[]): GetOpts {
+	const opts: GetOpts = { file: "", segments: [], width: 80 };
+	let gotFile = false;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-h" || arg === "--help") { process.stdout.write(helpGet()); process.exit(0); }
+		if (arg === "-c" || arg === "--color") { opts.color = true; continue; }
+		if (arg === "--no-color") { opts.color = false; continue; }
+		if (arg === "-f" || arg === "--format") { opts.format = parseFormatFlag(argv[++i], arg, "get"); continue; }
+		if (arg === "-w" || arg === "--width") { opts.width = parseIntFlag(argv[++i], arg, "get"); continue; }
+		if (arg === "-o" || arg === "--output") {
+			const v = argv[++i]; if (!v) fail("get", `${arg} requires a value`);
+			opts.output = v; continue;
+		}
+		if (arg === "-" && !gotFile) { opts.file = "-"; gotFile = true; continue; }
+		if (arg.startsWith("-") && arg !== "-") {
+			// Negative numeric segment (e.g. -1) — ambiguous with flags; disallow to keep parser simple
+			fail("get", `unknown option: ${arg}`, `run 'rx get --help' for usage`);
+		}
+		if (!gotFile) { opts.file = arg; gotFile = true; continue; }
+		opts.segments.push(arg);
+	}
+	if (!gotFile) fail("get", "missing FILE argument", `example: rx get data.rx users 0 name`);
+	return opts;
+}
+
+function applyPath(value: unknown, segments: string[]): unknown {
+	let current: unknown = value;
+	const trail: string[] = [];
 	for (const seg of segments) {
-		const idx = /^\d+$/.test(seg) ? parseInt(seg, 10) : undefined;
-		if (Array.isArray(current) && idx !== undefined) {
-			if (idx < 0 || idx >= current.length) return undefined;
+		if (Array.isArray(current)) {
+			const idx = /^\d+$/.test(seg) ? parseInt(seg, 10) : NaN;
+			if (!Number.isInteger(idx)) {
+				fail("get", `path [${[...trail, seg].join(", ")}] — '${seg}' is not a numeric index (array at [${trail.join(", ")}] has length ${current.length})`);
+			}
+			if (idx < 0 || idx >= current.length) {
+				fail("get", `path [${[...trail, seg].join(", ")}] — index ${idx} out of range in ${current.length}-element array`);
+			}
 			current = current[idx];
 		} else if (isObj(current)) {
-			if (!(seg in current)) return undefined;
+			if (!(seg in current)) {
+				fail("get", `path [${[...trail, seg].join(", ")}] — '${seg}' not found in object at [${trail.join(", ")}]`);
+			}
 			current = current[seg];
 		} else {
-			return undefined;
+			fail("get", `path [${[...trail, seg].join(", ")}] — cannot index into ${typeLabel(current)} at [${trail.join(", ")}]`);
 		}
+		trail.push(seg);
 	}
 	return current;
 }
 
-const MAX_COMPLETIONS = 50;
+function typeLabel(v: unknown): string {
+	if (v === null) return "null";
+	if (Array.isArray(v)) return "array";
+	return typeof v;
+}
 
-function collapseCompletions(matches: string[], partial: string): string[] {
-	if (matches.length <= MAX_COMPLETIONS) return matches;
-	matches.sort();
-	const maxLen = matches[matches.length - 1]!.length;
-	function distinctAt(len: number): number {
-		let count = 1;
-		for (let i = 1; i < matches.length; i++) {
-			const a = matches[i - 1]!, b = matches[i]!;
-			let same = a.length >= len && b.length >= len;
-			if (same) {
-				for (let j = 0; j < len; j++) {
-					if (a.charCodeAt(j) !== b.charCodeAt(j)) { same = false; break; }
-				}
-			} else {
-				const end = Math.min(a.length, b.length);
-				for (let j = 0; j < end; j++) {
-					if (a.charCodeAt(j) !== b.charCodeAt(j)) { same = false; break; }
-				}
-				if (same) same = a.length === b.length;
-			}
-			if (!same) count++;
+async function runGet(argv: string[]): Promise<void> {
+	const opts = parseGetArgs(argv);
+	const isTTY = opts.output ? false : (process.stdout.isTTY ?? false);
+	const color = resolveColor(opts.color, isTTY);
+	const format = resolveOutputFormat(opts.format, isTTY);
+	applyTheme(color);
+	const parsed = await readSource(opts.file);
+	const picked = applyPath(parsed.value, opts.segments);
+	const bytes = render(picked, format, color && format !== "rxb", opts.width);
+	if (opts.output) await writeFile(opts.output, bytes);
+	else process.stdout.write(bytes);
+}
+
+// ── Subcommand: inspect ──────────────────────────────────────────────────────
+
+function helpInspect(): string {
+	return `
+${tH1}rx inspect${tR} — dump the encoding AST (debug).
+
+${tH2}USAGE${tR}
+  ${tCmd}rx inspect${tR} [${tArg}FILE${tR} | ${tArg}-${tR}]
+
+Outputs a JSON structure describing offsets, tags, and children.
+Useful when developing or debugging the rx format itself.
+
+${tH2}OPTIONS${tR}
+  ${tCmd}-o${tR}, ${tCmd}--output${tR} ${tArg}PATH${tR}                 Write to PATH instead of stdout
+      ${tCmd}--no-color${tR}                      Disable color
+  ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
+
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx inspect${tR} ${tArg}data.rx${tR}
+  ${tCmd}rx inspect${tR} ${tArg}data.json${tR}               ${tDesc}# encode first, then dump AST${tR}
+`;
+}
+
+async function runInspect(argv: string[]): Promise<void> {
+	let file = "";
+	let output: string | undefined;
+	let color: boolean | undefined;
+	let gotFile = false;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-h" || arg === "--help") { process.stdout.write(helpInspect()); process.exit(0); }
+		if (arg === "--no-color") { color = false; continue; }
+		if (arg === "-o" || arg === "--output") {
+			const v = argv[++i]; if (!v) fail("inspect", `${arg} requires a value`);
+			output = v; continue;
 		}
-		return count;
+		if (arg === "-") { file = "-"; gotFile = true; continue; }
+		if (arg.startsWith("-")) fail("inspect", `unknown option: ${arg}`);
+		if (gotFile) fail("inspect", "takes only one input");
+		file = arg; gotFile = true;
 	}
-	let lo = partial.length + 1;
-	let hi = maxLen;
-	while (lo < hi) {
-		const mid = (lo + hi + 1) >>> 1;
-		if (distinctAt(mid) <= MAX_COMPLETIONS) lo = mid;
-		else hi = mid - 1;
-	}
-	const result: string[] = [matches[0]!.slice(0, lo)];
-	for (let i = 1; i < matches.length; i++) {
-		const p = matches[i]!.slice(0, lo);
-		if (p !== result[result.length - 1]) result.push(p);
-	}
-	return result;
+	if (!gotFile) file = process.stdin.isTTY ? "" : "-";
+	if (!file) { process.stdout.write(helpInspect()); process.exit(0); }
+	const isTTY = output ? false : (process.stdout.isTTY ?? false);
+	const useColor = resolveColor(color, isTTY);
+	applyTheme(useColor);
+	const parsed = await readSource(file);
+	const rxBytes = parsed.rxBytes ?? encode(parsed.value);
+	const ast = inspect(rxBytes);
+	const text = JSON.stringify(ast, null, 2);
+	const out = new TextEncoder().encode((useColor ? highlightJSON(text) : text) + "\n");
+	if (output) await writeFile(output, out);
+	else process.stdout.write(out);
 }
 
-function generateCompletions(value: unknown, segments: string[], partial: string): string[] {
-	const target = walkSegments(value, segments);
-	if (target === null || target === undefined || typeof target !== "object") return [];
-	let matches: string[];
-	if (Array.isArray(target)) {
-		matches = target.map((_, i) => String(i)).filter(s => s.startsWith(partial));
-	} else {
-		matches = Object.keys(target as Record<string, unknown>).filter(k => k.startsWith(partial));
-	}
-	return collapseCompletions(matches, partial);
+// ── Subcommand: stats ────────────────────────────────────────────────────────
+
+function helpStats(): string {
+	return `
+${tH1}rx stats${tR} — show size breakdown and compression ratios.
+
+${tH2}USAGE${tR}
+  ${tCmd}rx stats${tR} [${tArg}FILE${tR} | ${tArg}-${tR}]
+
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx stats${tR} ${tArg}data.rx${tR}
+  ${tCmd}rx stats${tR} ${tArg}data.json${tR}
+`;
 }
 
-async function handleCompletions(argv: string[]) {
-	const words = argv.length > 0 ? argv : [""];
-	const current = words[words.length - 1]!;
-	const prev = words.length >= 2 ? words[words.length - 2] : undefined;
-
-	if (prev === "--to") return printCompletions(["json", "rexc", "rxb", "tree", "ast"]);
-	if (prev === "-o" || prev === "--out") return printCompletions(listFiles(current, false));
-
-	const selectIdx = findSelectIndex(words);
-	if (selectIdx >= 0 && !current.startsWith("-")) {
-		const files = extractFiles(words.slice(0, selectIdx));
-		if (files.length > 0) {
-			const segments = words.slice(selectIdx + 1, -1);
-			try {
-				const raw = await readFile(files[0]!, "utf8");
-				const format = formatFromExt(files[0]!) ?? detectFormat(raw);
-				const { value } = parseRaw(raw, format);
-				return printCompletions(generateCompletions(value, segments, current));
-			} catch { /* can't parse, no completions */ }
-		}
-		return printCompletions([]);
+async function runStats(argv: string[]): Promise<void> {
+	let file = "";
+	let gotFile = false;
+	for (const arg of argv) {
+		if (arg === "-h" || arg === "--help") { process.stdout.write(helpStats()); process.exit(0); }
+		if (arg.startsWith("-") && arg !== "-") fail("stats", `unknown option: ${arg}`);
+		if (gotFile) fail("stats", "takes only one input");
+		file = arg; gotFile = true;
 	}
-
-	if (current.startsWith("-")) return printCompletions(ALL_FLAGS.filter(f => f.startsWith(current)));
-	return printCompletions(listFiles(current, true));
+	if (!gotFile) file = process.stdin.isTTY ? "" : "-";
+	if (!file) { process.stdout.write(helpStats()); process.exit(0); }
+	const parsed = await readSource(file);
+	const jsonBytes = new TextEncoder().encode(JSON.stringify(parsed.value)).length;
+	const rxBytes = parsed.rxBytes ? parsed.rxBytes.length : new TextEncoder().encode(stringify(parsed.value)).length;
+	const rxbBytes = parsed.rxbBytes ? parsed.rxbBytes.length : rxbEncode(parsed.value).length;
+	const source = parsed.inputFormat;
+	const pct = (n: number, base: number) => base === 0 ? "—" : `${((1 - n / base) * 100).toFixed(1)}% smaller`;
+	process.stdout.write(
+		`source format:  ${source}\n` +
+		`json:           ${jsonBytes.toLocaleString()} bytes\n` +
+		`rx text:        ${rxBytes.toLocaleString()} bytes  (${pct(rxBytes, jsonBytes)} than json)\n` +
+		`rxb binary:     ${rxbBytes.toLocaleString()} bytes  (${pct(rxbBytes, jsonBytes)} than json, ${pct(rxbBytes, rxBytes)} than rx)\n`,
+	);
 }
 
-// ── Shell completion scripts & setup ─────────────────────────
+// ── Subcommand: demo ─────────────────────────────────────────────────────────
+
+function helpDemo(): string {
+	return `
+${tH1}rx demo${tR} — show an example value in all three formats side by side.
+
+${tH2}USAGE${tR}
+  ${tCmd}rx demo${tR}
+
+Prints a built-in sample value in JSON, rx text, and rxb binary form.
+Useful for learning what the formats look like.
+`;
+}
+
+async function runDemo(argv: string[]): Promise<void> {
+	for (const arg of argv) {
+		if (arg === "-h" || arg === "--help") { process.stdout.write(helpDemo()); process.exit(0); }
+		fail("demo", `unknown argument: ${arg}`);
+	}
+	const color = resolveColor(undefined, process.stdout.isTTY ?? false);
+	applyTheme(color);
+	const sample = {
+		name: "rx-demo",
+		version: "0.9.0",
+		routes: [
+			{ path: "/api", action: "proxy" },
+			{ path: "/static", action: "serve" },
+		],
+		flags: { cache: true, compress: true },
+	};
+	const rxText = stringify(sample);
+	const rxbBytes = rxbEncode(sample);
+	const jsonText = JSON.stringify(sample, null, 2);
+	const tree = treeStringify(sample, 80);
+	const w = (title: string, body: string) => `${tH2}${title}${tR}\n${body}\n\n`;
+	process.stdout.write("\n" + w("Tree view", color ? tree.split("\n").map(highlightTree).join("\n") : tree));
+	process.stdout.write(w("JSON", color ? highlightJSON(jsonText) : jsonText));
+	process.stdout.write(w(`rx text (${new TextEncoder().encode(rxText).length} bytes)`, rxText));
+	process.stdout.write(w(`rxb binary (${rxbBytes.length} bytes, shown as hex)`, hex(rxbBytes)));
+}
+
+function hex(bytes: Uint8Array): string {
+	let out = "";
+	for (let i = 0; i < bytes.length; i += 16) {
+		const row: string[] = [];
+		for (let j = 0; j < 16 && i + j < bytes.length; j++) row.push(bytes[i + j]!.toString(16).padStart(2, "0"));
+		out += row.join(" ") + "\n";
+	}
+	return out;
+}
+
+// ── Subcommand: completions ──────────────────────────────────────────────────
 
 const ZSH_COMPLETION = `#compdef rx
 _rx() {
 	local -a results
-	results=("\${(@f)$(rx --completions -- "\${(@)words[2,$CURRENT]}" 2>/dev/null)}")
+	results=("\${(@f)$(rx completions --complete -- "\${(@)words[2,$CURRENT]}" 2>/dev/null)}")
 	(( \${#results} == 0 )) && return
-	local in_select=0
-	local i
-	for (( i=2; i < CURRENT; i++ )); do
-		[[ "\${words[$i]}" == (-s|--select) ]] && in_select=1 && break
-	done
 	local last="\${words[$CURRENT]}"
-	if [[ "$last" == -* ]] || (( in_select )); then
+	if [[ "$last" == -* ]]; then
 		compadd -Q -S '' -- "\${results[@]}"
 	elif [[ "$last" == '~'* ]]; then
 		compadd -U -Q -S '' -- "\${results[@]}"
@@ -743,7 +883,7 @@ _rx "$@"`;
 
 const BASH_COMPLETION = `_rx() {
 	local IFS=$'\\n'
-	COMPREPLY=($(rx --completions -- "\${COMP_WORDS[@]:1}" 2>/dev/null))
+	COMPREPLY=($(rx completions --complete -- "\${COMP_WORDS[@]:1}" 2>/dev/null))
 	[[ \${#COMPREPLY[@]} -gt 0 ]] && compopt -o nospace
 }
 complete -o default -F _rx rx`;
@@ -758,20 +898,12 @@ function detectShell(): Shell | undefined {
 }
 
 async function removeIfSymlink(path: string) {
-	try {
-		const stat = await lstat(path);
-		if (stat.isSymbolicLink()) await unlink(path);
-	} catch { /* doesn't exist */ }
+	try { const st = await lstat(path); if (st.isSymbolicLink()) await unlink(path); } catch {}
 }
 
-async function setupCompletions(args: string[]) {
-	let shell = args[0] as Shell | undefined;
-	if (shell && shell !== "zsh" && shell !== "bash") {
-		throw new Error(`Unsupported shell: ${shell}. Use 'zsh' or 'bash'.`);
-	}
+async function installCompletions(shell: Shell | undefined) {
 	shell ??= detectShell();
-	if (!shell) throw new Error("Cannot detect shell. Specify: rx setup-completions zsh|bash");
-
+	if (!shell) fail("completions", "cannot auto-detect shell", `specify explicitly: rx completions install zsh|bash`);
 	const home = homedir();
 	const isZsh = shell === "zsh";
 	const dir = isZsh
@@ -779,114 +911,238 @@ async function setupCompletions(args: string[]) {
 		: join(home, ".local", "share", "bash-completion", "completions");
 	const dest = join(dir, isZsh ? "_rx" : "rx");
 	const script = isZsh ? ZSH_COMPLETION : BASH_COMPLETION;
-
 	await mkdir(dir, { recursive: true });
 	await removeIfSymlink(dest);
 	await writeFile(dest, script + "\n", "utf8");
-
-	const instructions = isZsh
-		? `\nEnsure this is in your ~/.zshrc:\n\n  fpath=(${dir} $fpath)\n  autoload -Uz compinit && compinit\n\nThen restart your shell or run: exec zsh`
-		: `\nEnsure bash-completion is loaded in your ~/.bashrc:\n\n  [[ -r ${dir}/rx ]] && source ${dir}/rx\n\nThen restart your shell or run: source ~/.bashrc`;
-
-	process.stderr.write(`Installed ${shell} completions to ${dest}${instructions}\n`);
+	const hint = isZsh
+		? `Ensure this is in your ~/.zshrc:\n\n  fpath=(${dir} $fpath)\n  autoload -Uz compinit && compinit\n\nThen: exec zsh`
+		: `Ensure in your ~/.bashrc:\n\n  [[ -r ${dest} ]] && source ${dest}\n\nThen: source ~/.bashrc`;
+	process.stderr.write(`Installed ${shell} completions to ${dest}\n\n${hint}\n`);
 }
 
-// ── Main ─────────────────────────────────────────────────────
+function helpCompletions(): string {
+	return `
+${tH1}rx completions${tR} — shell tab completion.
 
-async function main() {
-	const argv = process.argv.slice(2);
+${tH2}USAGE${tR}
+  ${tCmd}rx completions zsh${tR}                  Print zsh completion script
+  ${tCmd}rx completions bash${tR}                 Print bash completion script
+  ${tCmd}rx completions install${tR} [${tArg}SHELL${tR}]     Install to the standard location
 
-	if (argv[0] === "--completions") {
-		const sub = argv[1];
-		if (sub === "setup") { await setupCompletions(argv.slice(2)); return; }
-		if (sub === "zsh" || sub === "bash") {
-			process.stdout.write((sub === "zsh" ? ZSH_COMPLETION : BASH_COMPLETION) + "\n");
-			return;
-		}
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx completions zsh${tR} > ~/.zsh/_rx
+  ${tCmd}rx completions install${tR}              ${tDesc}# auto-detects shell${tR}
+  ${tCmd}rx completions install bash${tR}
+`;
+}
+
+const SUBCOMMANDS = ["show", "convert", "get", "inspect", "stats", "demo", "completions", "help"] as const;
+
+async function runCompletions(argv: string[]): Promise<void> {
+	const sub = argv[0];
+	if (!sub || sub === "-h" || sub === "--help") { process.stdout.write(helpCompletions()); return; }
+	if (sub === "zsh") { process.stdout.write(ZSH_COMPLETION + "\n"); return; }
+	if (sub === "bash") { process.stdout.write(BASH_COMPLETION + "\n"); return; }
+	if (sub === "install") { await installCompletions(argv[1] as Shell | undefined); return; }
+	if (sub === "--complete") {
+		// Called by shell completion scripts with remaining args as the word list.
 		const dashDash = argv.indexOf("--");
-		await handleCompletions(dashDash >= 0 ? argv.slice(dashDash + 1) : []);
+		const words = dashDash >= 0 ? argv.slice(dashDash + 1) : [];
+		await handleCompleteRequest(words);
 		return;
 	}
-
-	const opts = parseArgs(argv);
-	applyTheme(opts.color);
-	if (opts.help) { console.log(usage()); return; }
-
-	tune({
-		indexThreshold: opts.indexThreshold,
-		stringChainThreshold: opts.stringChainThreshold,
-		stringChainDelimiter: opts.stringChainDelimiter,
-		dedupComplexityLimit: opts.dedupComplexityLimit,
-	});
-
-	const { value: parsed, rexcBytes, rxbBytes } = await readInput(opts);
-	const inputIsRx = !!(rexcBytes || rxbBytes);
-
-	if (opts.write) {
-		if (opts.files.length !== 1) throw new Error("--write requires exactly one input file");
-		const file = opts.files[0]!;
-		const ext = extname(file);
-		const value = opts.select ? applySelector(parsed, opts.select) : parsed;
-		let outPath: string;
-		let outFormat: OutputFormat;
-		if (ext === ".json") {
-			// Default: json → rx. With -b flag: json → rxb.
-			outFormat = opts.toFormat === "rxb" ? "rxb" : "rexc";
-			outPath = file.slice(0, -ext.length) + (outFormat === "rxb" ? ".rxb" : ".rx");
-		} else if (ext === ".rx" || ext === ".rexc") {
-			outFormat = opts.toFormat === "rxb" ? "rxb" : "json";
-			outPath = file.slice(0, -ext.length) + (outFormat === "rxb" ? ".rxb" : ".json");
-		} else if (ext === ".rxb") {
-			outFormat = opts.toFormat === "rexc" ? "rexc" : "json";
-			outPath = file.slice(0, -ext.length) + (outFormat === "rexc" ? ".rx" : ".json");
-		} else {
-			throw new Error(`--write: unsupported extension '${ext}' (expected .json, .rx, .rexc, or .rxb)`);
-		}
-		const bin = formatOutputBinary(value, outFormat);
-		if (bin) {
-			await writeFile(outPath, bin);
-		} else {
-			const out = formatOutput(value, outFormat, false, rexcBytes);
-			await writeFile(outPath, out + "\n", "utf8");
-		}
-		return;
-	}
-
-	const toFormat: OutputFormat = opts.toFormat === "other"
-		? (inputIsRx ? "json" : "rexc")
-		: opts.toFormat ?? (process.stdout.isTTY ? "tree" : (inputIsRx ? "json" : "rexc"));
-	const value = opts.select ? applySelector(parsed, opts.select) : parsed;
-
-	// Binary output (rxb)
-	const bin = formatOutputBinary(value, toFormat);
-	if (bin) {
-		if (opts.out) {
-			await writeFile(opts.out, bin);
-		} else {
-			process.stdout.write(bin);
-		}
-		return;
-	}
-
-	// Stream tree to stdout line-by-line
-	if (toFormat === "tree" && !opts.out) {
-		treeStringify(value, opts.color
-			? (line: string) => { process.stdout.write(highlightTree(line) + "\n"); }
-			: (line: string) => { process.stdout.write(line + "\n"); },
-		);
-		return;
-	}
-
-	const out = formatOutput(value, toFormat, opts.color, rexcBytes);
-
-	if (opts.out) {
-		await writeFile(opts.out, out + "\n", "utf8");
-	} else {
-		process.stdout.write(out + "\n");
-	}
+	fail("completions", `unknown action: ${sub}`, `expected: zsh | bash | install`);
 }
 
-await main().catch((error) => {
+async function handleCompleteRequest(words: string[]): Promise<void> {
+	const current = words[words.length - 1] ?? "";
+	const prev = words.length >= 2 ? words[words.length - 2] : undefined;
+	// First word: subcommand
+	if (words.length <= 1) {
+		const matches = [...SUBCOMMANDS].filter(s => s.startsWith(current));
+		if (matches.length) process.stdout.write(matches.join("\n") + "\n");
+		return;
+	}
+	const sub = words[0];
+	if (current.startsWith("-")) {
+		const flags = FLAGS_BY_SUB[sub!] ?? [];
+		const matches = flags.filter(f => f.startsWith(current));
+		if (matches.length) process.stdout.write(matches.join("\n") + "\n");
+		return;
+	}
+	if (prev === "-f" || prev === "--format") {
+		process.stdout.write(["tree", "json", "rx", "rxb"].filter(s => s.startsWith(current)).join("\n") + "\n");
+		return;
+	}
+	if (prev === "--from" || prev === "--to") {
+		process.stdout.write(["json", "rx", "rxb"].filter(s => s.startsWith(current)).join("\n") + "\n");
+		return;
+	}
+	// File completion with data-extension priority
+	const files = listFiles(current);
+	if (files.length) process.stdout.write(files.join("\n") + "\n");
+}
+
+const FLAGS_BY_SUB: Record<string, string[]> = {
+	show: ["-f", "--format", "-w", "--width", "-c", "--color", "--no-color", "-o", "--output", "-h", "--help"],
+	convert: ["--from", "--to", "--tune-index-threshold", "--tune-chain-threshold", "--tune-chain-delimiter", "--tune-dedup-limit", "-h", "--help"],
+	get: ["-f", "--format", "-w", "--width", "-c", "--color", "--no-color", "-o", "--output", "-h", "--help"],
+	inspect: ["-o", "--output", "--no-color", "-h", "--help"],
+	stats: ["-h", "--help"],
+	demo: ["-h", "--help"],
+	completions: ["-h", "--help"],
+	help: ["--all"],
+};
+
+const DATA_EXTENSIONS = [".json", ".rx", ".rxb"];
+
+function listFiles(prefix: string): string[] {
+	const home = homedir();
+	let p = prefix;
+	const tildePrefix = p.startsWith("~/");
+	if (p === "~") return ["~/"];
+	if (tildePrefix) p = join(home, p.slice(2));
+	let dir: string, partial: string;
+	if (p.endsWith("/")) { dir = p.slice(0, -1); partial = ""; }
+	else if (p.includes("/")) { dir = dirname(p); partial = basename(p); }
+	else { dir = "."; partial = p; }
+	try {
+		const entries = readdirSync(dir, { withFileTypes: true });
+		const results: string[] = [];
+		for (const entry of entries) {
+			if (!entry.name.startsWith(partial)) continue;
+			if (entry.name.startsWith(".") && !partial.startsWith(".")) continue;
+			const rel = dir === "." ? entry.name : join(dir, entry.name);
+			const render = tildePrefix ? "~/" + rel.slice(home.length + 1) : rel;
+			if (entry.isDirectory()) results.push(render + "/");
+			else if (DATA_EXTENSIONS.some(ext => entry.name.endsWith(ext))) results.push(render);
+		}
+		return results.sort();
+	} catch { return []; }
+}
+
+// ── Top-level help & version ─────────────────────────────────────────────────
+
+function helpTop(): string {
+	return `
+${tH1}rx${tR} — convert, inspect, and query compact JSON-shaped data.
+
+${tH2}USAGE${tR}
+  ${tCmd}rx${tR} ${tArg}FILE${tR}                           ${tDesc}# Pretty-print FILE (default action)${tR}
+  ${tCmd}rx${tR} [${tArg}COMMAND${tR}] [${tArg}ARGS${tR}...]
+
+${tH2}COMMANDS${tR}
+  ${tCmd}show${tR}      Pretty-print a file
+  ${tCmd}convert${tR}   Convert between JSON, rx, and rxb
+  ${tCmd}get${tR}       Extract a value at a path
+  ${tCmd}help${tR}      Show help for a command (${tCmd}rx help${tR} ${tArg}COMMAND${tR})
+
+${tH2}FORMATS${tR}
+  ${tArg}.json${tR}  JSON text
+  ${tArg}.rx${tR}    rx text format (compact, human-readable)
+  ${tArg}.rxb${tR}   rx binary format (smallest)
+
+${tH2}GLOBAL OPTIONS${tR}
+  ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
+  ${tCmd}-v${tR}, ${tCmd}--version${tR}                       Print version (${VERSION})
+
+${tH2}ENVIRONMENT${tR}
+  ${tArg}RX_FORMAT${tR}                         Pin default output format (${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR})
+  ${tArg}NO_COLOR${tR}                          Disable ANSI color when set
+
+${tH2}EXAMPLES${tR}
+  ${tCmd}rx${tR} ${tArg}data.rx${tR}                         ${tDesc}# Pretty-print${tR}
+  ${tCmd}cat${tR} ${tArg}data.rx${tR} | ${tCmd}rx${tR}                   ${tDesc}# From stdin${tR}
+  ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rx${tR}       ${tDesc}# Convert${tR}
+  ${tCmd}rx get${tR} ${tArg}data.rx${tR} ${tArg}users${tR} ${tArg}0${tR} ${tArg}name${tR}         ${tDesc}# Extract a value${tR}
+
+Run ${tCmd}rx help${tR} ${tArg}COMMAND${tR} for details, or ${tCmd}rx help --all${tR} for advanced commands.
+`;
+}
+
+function helpAll(): string {
+	return helpTop() + `
+${tH2}ADVANCED COMMANDS${tR}
+  ${tCmd}inspect${tR}       Dump the encoding AST as JSON (debug)
+  ${tCmd}stats${tR}         Size breakdown and compression ratios
+  ${tCmd}demo${tR}          Built-in sample value in all three formats
+  ${tCmd}completions${tR}   Shell tab completion (zsh, bash)
+`;
+}
+
+function runHelp(argv: string[]): void {
+	if (argv.length === 0) { process.stdout.write(helpTop()); return; }
+	const topic = argv[0];
+	if (topic === "--all" || topic === "-a") { process.stdout.write(helpAll()); return; }
+	const helps: Record<string, () => string> = {
+		show: helpShow, convert: helpConvert, get: helpGet,
+		inspect: helpInspect, stats: helpStats, demo: helpDemo,
+		completions: helpCompletions, help: () => helpTop(),
+	};
+	const h = helps[topic!];
+	if (!h) {
+		const hint = suggest(topic!, SUBCOMMANDS);
+		fail("help", `unknown command '${topic}'`, hint ? `did you mean '${hint}'?` : `known: ${SUBCOMMANDS.join(", ")}`);
+	}
+	process.stdout.write(h());
+}
+
+// ── Main dispatcher ──────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+	const argv = process.argv.slice(2);
+	const first = argv[0];
+
+	// Global --version / -v (anywhere before a subcommand)
+	if (first === "-v" || first === "--version") {
+		process.stdout.write(`rx ${VERSION}\n`);
+		return;
+	}
+
+	// Global --help / -h → top-level help
+	if (first === "-h" || first === "--help") {
+		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
+		process.stdout.write(helpTop());
+		return;
+	}
+
+	// Explicit subcommand
+	if (first === "show") return runShow(argv.slice(1));
+	if (first === "convert") return runConvert(argv.slice(1));
+	if (first === "get") return runGet(argv.slice(1));
+	if (first === "help") {
+		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
+		return runHelp(argv.slice(1));
+	}
+	if (first === "inspect") return runInspect(argv.slice(1));
+	if (first === "stats") return runStats(argv.slice(1));
+	if (first === "demo") return runDemo(argv.slice(1));
+	if (first === "completions") return runCompletions(argv.slice(1));
+
+	// No args: show from stdin if piped, else print help
+	if (first === undefined) {
+		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
+		if (process.stdin.isTTY) { process.stdout.write(helpTop()); return; }
+		return runShow(["-"]);
+	}
+
+	// Bare file-like arg → show
+	if (first === "-" || !first.startsWith("-")) return runShow(argv);
+
+	// Unknown option at top level
+	const hint = suggest(first.replace(/^-+/, ""), SUBCOMMANDS);
+	fail("rx", `unknown command or option: ${first}`,
+		hint ? `did you mean '${hint}'?` : `run 'rx --help' for usage`);
+}
+
+main().catch((error) => {
+	if (error instanceof CliError) {
+		const prefix = error.subcmd === "rx" ? "rx" : `rx ${error.subcmd}`;
+		process.stderr.write(`${prefix}: ${error.message}`);
+		if (error.suggestion) process.stderr.write(`\n  — ${error.suggestion}`);
+		process.stderr.write("\n");
+		process.exit(2);
+	}
 	const message = error instanceof Error ? error.message : String(error);
 	process.stderr.write(`rx: ${message}\n`);
 	process.exit(1);
