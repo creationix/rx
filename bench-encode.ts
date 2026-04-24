@@ -2,6 +2,18 @@ import { encode } from "./rx";
 import { encode as rxbEncode } from "./rxb";
 import { readFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
+import { createRequire } from "module";
+
+// Try to load native module
+let nativeEncodeRxb: ((json: Buffer) => Buffer) | undefined;
+try {
+  const require = createRequire(import.meta.url);
+  const native = require("./native/rx-native.node");
+  nativeEncodeRxb = native.encodeRxb;
+  console.log("Native module loaded.\n");
+} catch (e) {
+  console.log(`Native module not available: ${e instanceof Error ? e.message : e}\n`);
+}
 
 // ── Benchmark harness ──
 
@@ -131,4 +143,11 @@ for (const { name, data } of datasets) {
   const rxbBytes = rxbEncode(data);
   const rxbSize = `${(rxbBytes.length / 1024).toFixed(1)} KB`;
   bench(`rxb encode`.padEnd(24) + `[${rxbSize}]`, () => rxbEncode(data), iters);
+
+  if (nativeEncodeRxb) {
+    const jsonBuf = Buffer.from(jsonStr);
+    const nativeBytes = nativeEncodeRxb(jsonBuf);
+    const nativeSize = `${(nativeBytes.length / 1024).toFixed(1)} KB`;
+    bench(`rxb native`.padEnd(24) + `[${nativeSize}]`, () => nativeEncodeRxb!(Buffer.from(JSON.stringify(data))), iters);
+  }
 }

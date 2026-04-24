@@ -163,6 +163,19 @@ export function isHexString(s: string): boolean {
   return true;
 }
 
+/** Classify a string as hex, b64, or regular in a single pass.
+ *  hex is a subset of b64, so we check both simultaneously. */
+export function classifyString(s: string): 0 | 1 | 2 { // 0=str, 1=hex, 2=b64
+  if (s.length < 4) return 0;
+  let allHex = true;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c > 127 || b64sDecodeTable[c]! === 0xFF) return 0;
+    if (allHex && hexChars[c]! === 0xFF) allHex = false;
+  }
+  return allHex ? 1 : 2;
+}
+
 /** Pack a hex string into bytes. 2 hex chars per byte, high nibble first.
  *  Odd length: leading byte has high nibble = 0. */
 export function hexEncode(hex: string): Uint8Array {
@@ -176,6 +189,19 @@ export function hexEncode(hex: string): Uint8Array {
     else bytes[byteIdx]! |= nibble;
   }
   return bytes;
+}
+
+/** Pack hex string directly into target buffer at offset. Returns bytes written. */
+export function hexEncodeInto(hex: string, target: Uint8Array, targetOff: number): number {
+  const byteLen = Math.ceil(hex.length / 2);
+  const pad = hex.length % 2;
+  for (let i = 0; i < hex.length; i++) {
+    const nibble = hexChars[hex.charCodeAt(i)]!;
+    const byteIdx = (i + pad) >> 1;
+    if ((i + pad) % 2 === 0) target[targetOff + byteIdx] = nibble << 4;
+    else target[targetOff + byteIdx]! |= nibble;
+  }
+  return byteLen;
 }
 
 /** Unpack bytes back to a hex string of the given character count. */
@@ -215,22 +241,28 @@ export function isB64String(s: string): boolean {
 export function b64sEncode(s: string): Uint8Array {
   const byteLen = Math.ceil(s.length * 6 / 8);
   const bytes = new Uint8Array(byteLen);
+  b64sEncodeInto(s, bytes, 0);
+  return bytes;
+}
+
+/** Pack b64 string directly into target buffer at offset. Returns bytes written. */
+export function b64sEncodeInto(s: string, target: Uint8Array, targetOff: number): number {
+  const byteLen = Math.ceil(s.length * 6 / 8);
   let bitBuf = 0;
   let bitCount = 0;
-  let byteIdx = 0;
+  let byteIdx = targetOff;
   for (let i = 0; i < s.length; i++) {
     bitBuf = (bitBuf << 6) | b64sDecodeTable[s.charCodeAt(i)]!;
     bitCount += 6;
     while (bitCount >= 8) {
       bitCount -= 8;
-      bytes[byteIdx++] = (bitBuf >> bitCount) & 0xFF;
+      target[byteIdx++] = (bitBuf >> bitCount) & 0xFF;
     }
   }
-  // Flush remaining bits (zero-padded on the right)
   if (bitCount > 0) {
-    bytes[byteIdx] = (bitBuf << (8 - bitCount)) & 0xFF;
+    target[byteIdx] = (bitBuf << (8 - bitCount)) & 0xFF;
   }
-  return bytes;
+  return byteLen;
 }
 
 /** Unpack bytes back to a base64 string of the given character count. */
@@ -1154,8 +1186,36 @@ export function encode(value: unknown, options?: EncodeOptions): Uint8Array;
 export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array | undefined {
   const opts = { ...ENCODE_DEFAULTS, ...options };
   const indexThreshold = opts.indexThreshold ?? INDEX_THRESHOLD;
-  const chainThreshold = opts.stringChainThreshold ?? STRING_CHAIN_THRESHOLD;
-  const chainDelimiter = opts.stringChainDelimiter ?? STRING_CHAIN_DELIMITER;
+  const chainThreshold = opts.stringChainThreshold ?? Math.min(STRING_CHAIN_THRESHOLD, 24);
+  const chainDelimiter = opts.stringChainDelimiter ?? "/=";
+
+  // Build a fast delimiter lookup set for chain splitting (supports multi-char delimiter strings)
+  const chainDelimSet = new Uint8Array(128);
+  for (let i = 0; i < chainDelimiter.length; i++) chainDelimSet[chainDelimiter.charCodeAt(i)] = 1;
+
+  function hasDelimiter(s: string, from: number): boolean {
+    for (let i = from; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c < 128 && chainDelimSet[c]!) return true;
+    }
+    return false;
+  }
+
+  function lastDelimiterPos(s: string, before: number): number {
+    for (let i = before; i >= 0; i--) {
+      const c = s.charCodeAt(i);
+      if (c < 128 && chainDelimSet[c]!) return i;
+    }
+    return -1;
+  }
+
+  function nextDelimiterPos(s: string, after: number): number {
+    for (let i = after; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c < 128 && chainDelimSet[c]!) return i;
+    }
+    return -1;
+  }
 
   // Build ref name table (sorted for deterministic index assignment)
   const refEntries = Object.entries({ ...opts.refs });
@@ -1230,8 +1290,11 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     }
   }
 
-  // Lazy prefix tracking for string chains
+  // Lazy prefix tracking for string chains.
+  // knownPrefixLengths maps a string hash to the delimiter offset for splitting.
+  // This avoids re-scanning the string on repeated encounters.
   const knownPrefixes = chainDelimiter ? new Set<string>() : undefined;
+  const prefixLengths = chainDelimiter ? new Set<number>() : undefined;
 
   const hasRefs = refsByKey.size > 0;
 
@@ -1349,68 +1412,73 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
 
   function writeString(value: string) {
     // Try chain splitting for long strings with delimiters
-    if (knownPrefixes && value.length > chainThreshold && value.indexOf(chainDelimiter, 1) > 0) {
+    if (knownPrefixes && value.length > chainThreshold && hasDelimiter(value, 1)) {
+      // Scan right-to-left for a known prefix at any delimiter position
       let offset = value.length;
       while (offset > 0) {
-        offset = value.lastIndexOf(chainDelimiter, offset - 1);
+        offset = lastDelimiterPos(value, offset - 1);
         if (offset <= 0) break;
-        const prefix = value.slice(0, offset);
-        if (knownPrefixes.has(prefix)) {
-          const before = pos;
-          writeAny(value.substring(offset));
-          writeAny(prefix);
-          return emitTagVarint(TAG_CHAIN, pos - before);
+        // Quick reject: skip if no known prefix has this length
+        if (prefixLengths!.has(offset)) {
+          const prefix = value.slice(0, offset);
+          if (knownPrefixes.has(prefix)) {
+            const before = pos;
+            writeAny(value.substring(offset));
+            writeAny(prefix);
+            return emitTagVarint(TAG_CHAIN, pos - before);
+          }
         }
       }
+      // Register prefixes at all delimiter positions
       offset = 0;
       while (offset < value.length) {
-        const next = value.indexOf(chainDelimiter, offset + 1);
+        const next = nextDelimiterPos(value, offset + 1);
         if (next === -1) break;
-        knownPrefixes.add(value.slice(0, next));
+        const prefix = value.slice(0, next);
+        knownPrefixes.add(prefix);
+        prefixLengths!.add(next);
         offset = next;
       }
     }
 
-    // Check if hex encoding is beneficial (50% savings)
-    if (isHexString(value)) {
-      const packed = hexEncode(value);
-      ensureCapacity(packed.length + 16);
-      buf.set(packed, off);
-      pos += packed.length;
-      off += packed.length;
+    // Single-pass classification: hex (50% savings), b64 (25%), or regular
+    const cls = classifyString(value);
+    if (cls === 1) {
+      // Hex string — encode directly into output buffer
+      const byteLen = Math.ceil(value.length / 2);
+      ensureCapacity(byteLen + 16);
+      hexEncodeInto(value, buf, off);
+      pos += byteLen;
+      off += byteLen;
       return emitTagVarint(TAG_HEXSTR, value.length);
     }
-
-    // Check if b64 string encoding is beneficial (25% savings)
-    if (isB64String(value)) {
-      const packed = b64sEncode(value);
-      ensureCapacity(packed.length + 16);
-      buf.set(packed, off);
-      pos += packed.length;
-      off += packed.length;
+    if (cls === 2) {
+      // B64 string — encode directly into output buffer
+      const byteLen = Math.ceil(value.length * 6 / 8);
+      ensureCapacity(byteLen + 16);
+      b64sEncodeInto(value, buf, off);
+      pos += byteLen;
+      off += byteLen;
       return emitTagVarint(TAG_B64STR, value.length);
     }
 
-    // Regular string
+    // Regular string (cls === 0) — contains non-b64 chars or length < 4
     const len = value.length;
-    // Fast path: ASCII
-    let isASCII = true;
     if (len < 128) {
+      // Try fast ASCII path: scan for non-ASCII
+      let ascii = true;
       for (let i = 0; i < len; i++) {
-        if (value.charCodeAt(i) > 127) { isASCII = false; break; }
+        if (value.charCodeAt(i) > 127) { ascii = false; break; }
       }
-    } else {
-      isASCII = false;
-    }
-
-    if (isASCII) {
-      ensureCapacity(len + 16);
-      for (let i = 0; i < len; i++) {
-        buf[off + i] = value.charCodeAt(i);
+      if (ascii) {
+        ensureCapacity(len + 16);
+        for (let i = 0; i < len; i++) {
+          buf[off + i] = value.charCodeAt(i);
+        }
+        pos += len;
+        off += len;
+        return emitTagVarint(TAG_STRING, len);
       }
-      pos += len;
-      off += len;
-      return emitTagVarint(TAG_STRING, len);
     }
 
     const maxBytes = len * 3;
@@ -1493,32 +1561,48 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     const length = keys.length;
     if (length === 0) return emitTagVarint(TAG_MAP, 0);
 
-    const schemaLeaf = schemaUpsert(keys);
-    const schemaTarget = schemaLeaf[SCHEMA_OFFSET];
-    if (schemaTarget !== undefined) return writeSchemaObject(value, schemaTarget);
+    // Skip schema sharing for objects with ≤ 2 keys — pointer overhead exceeds savings
+    const schemaLeaf = length > 1 ? schemaUpsert(keys) : undefined;
+    if (schemaLeaf) {
+      const schemaTarget = schemaLeaf[SCHEMA_OFFSET];
+      if (schemaTarget !== undefined) return writeSchemaObject(value, schemaTarget);
+    }
 
     const before = pos;
-    const offsets = length > indexThreshold ? ({} as Record<string, number>) : undefined;
-    let lastOffset: number | undefined;
-    const entries = Object.entries(value);
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const [key, val] = entries[i] as [string, unknown];
-      writeAny(val);
-      writeAny(key);
-      if (offsets) {
-        offsets[key] = pos;
-        lastOffset = lastOffset ?? pos;
+    const needsIndex = length > indexThreshold;
+
+    if (needsIndex) {
+      // Pre-compute sorted order for index: sort key indices by UTF-8 order
+      const sortedIndices = new Array<number>(length);
+      for (let i = 0; i < length; i++) sortedIndices[i] = i;
+      sortedIndices.sort((a, b) => keys![a]! < keys![b]! ? -1 : keys![a]! > keys![b]! ? 1 : 0);
+
+      // Write entries in reverse insertion order, recording offsets per key index
+      const keyOffsets = new Array<number>(length);
+      for (let i = length - 1; i >= 0; i--) {
+        const key = keys[i]!;
+        writeAny(value[key]);
+        writeAny(key);
+        keyOffsets[i] = pos;
+      }
+
+      // Build sorted offsets array for index
+      const sortedOffsets = new Array<number>(length);
+      for (let i = 0; i < length; i++) {
+        sortedOffsets[i] = keyOffsets[sortedIndices[i]!]!;
+      }
+      writeIndex(sortedOffsets, length);
+    } else {
+      // Small object — no index needed
+      for (let i = length - 1; i >= 0; i--) {
+        const key = keys[i]!;
+        writeAny(value[key]);
+        writeAny(key);
       }
     }
 
-    if (offsets && lastOffset !== undefined) {
-      const sortedOffsets = Object.entries(offsets)
-        .sort(utf8SortEntries)
-        .map(entryValue) as number[];
-      writeIndex(sortedOffsets, length);
-    }
     const ret = emitTagVarint(TAG_MAP, pos - before);
-    schemaLeaf[SCHEMA_OFFSET] = pos;
+    if (schemaLeaf) schemaLeaf[SCHEMA_OFFSET] = pos;
     return ret;
   }
 
