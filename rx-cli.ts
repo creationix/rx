@@ -1,13 +1,17 @@
 import {
-	open, inspect, stringify, encode,
-	makeCursor, read,
+	stringify, encode,
 	tune,
 	INDEX_THRESHOLD, STRING_CHAIN_THRESHOLD, STRING_CHAIN_DELIMITER, DEDUP_COMPLEXITY_LIMIT
 } from "./rx.ts";
 import {
-	open as rxbOpen, encode as rxbEncode,
+	open, inspect,
+	makeCursor, read,
+} from "./rx-read.ts";
+import { encode as rxbEncode } from "./rxb.ts";
+import {
+	open as rxbOpen,
 	makeCursor as rxbMakeCursor, read as rxbRead,
-} from "./rxb.ts";
+} from "./rxb-read.ts";
 import { readdirSync } from "node:fs";
 import { readFile, writeFile, mkdir, unlink, lstat } from "node:fs/promises";
 import { homedir } from "node:os";
