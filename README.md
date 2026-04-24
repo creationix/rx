@@ -262,9 +262,7 @@ Every value is read **right-to-left**. The parser scans left past base64 digits 
 
 The encoder automatically deduplicates values, shares object schemas, compresses shared string prefixes, and adds sorted indexes. See the **[format spec](docs/rx-format.md)** for the full grammar, railroad diagrams, and a walkthrough of how a complete object is encoded byte by byte.
 
-![RX Viewer — interactive tree inspector](rexc-viewer-screenshot.png)
-
-To inspect real data, paste RX or JSON into the live viewer at **[rx.run](https://rx.run/)**.
+[![rx.run — interactive tree inspector](rx.run-screenshot.png)](https://rx.run/)
 
 ---
 
