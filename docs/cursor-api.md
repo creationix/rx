@@ -86,3 +86,7 @@ fromZigZag(1)      // -1
 Alphabet: `0-9a-zA-Z-_` (URL-safe, no padding). Big-endian. Zero is an empty string.
 
 See [rx-perf.md](../rx-perf.md) for detailed design notes on the cursor internals, Proxy wrapper, and full allocation profile.
+
+## RXB equivalents
+
+The binary `.rxb` format exposes the same cursor API with an `rxb` prefix — `rxbMakeCursor`, `rxbRead`, `rxbResolveStr`, `rxbFindKey`, `rxbSeekChild`, etc. Semantics are identical; only the wire format differs. See [rxb-format.md](./rxb-format.md).
