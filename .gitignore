@@ -1,5 +1,4 @@
 dist
 node_modules/
-large-sample.json
-large-sample-2.json
+large-sample.*
 buildinfo.*
