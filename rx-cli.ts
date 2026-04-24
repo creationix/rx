@@ -324,11 +324,22 @@ function resolveOutputFormat(flag: OutputFormat | undefined, isTTY: boolean): Ou
 	return isTTY ? "tree" : "json";
 }
 
-// Priority: --no-color > --color > NO_COLOR env > TTY.
+// Priority: explicit --color/--no-color > FORCE_COLOR env > NO_COLOR env > TTY.
 function resolveColor(flag: boolean | undefined, isTTY: boolean): boolean {
 	if (flag !== undefined) return flag;
+	const force = process.env.FORCE_COLOR;
+	if (force !== undefined && force !== "" && force !== "0" && force !== "false") return true;
 	if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "") return false;
 	return isTTY;
+}
+
+// Render a help string with the theme applied based on TTY + env.
+// All `--help` and default-on-no-args paths route through here so top-level
+// help (`rx --help`), subcommand help (`rx show --help`), and explicit help
+// (`rx help show`) all produce identical output.
+function printHelp(helpFn: () => string): void {
+	applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
+	process.stdout.write(helpFn());
 }
 
 // ── Error helpers ────────────────────────────────────────────────────────────
@@ -459,7 +470,7 @@ function parseShowArgs(argv: string[]): ShowOpts {
 	let gotFile = false;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
-		if (arg === "-h" || arg === "--help") { process.stdout.write(helpShow()); process.exit(0); }
+		if (arg === "-h" || arg === "--help") { printHelp(helpShow); process.exit(0); }
 		if (arg === "-c" || arg === "--color") { opts.color = true; continue; }
 		if (arg === "--no-color") { opts.color = false; continue; }
 		if (arg === "-f" || arg === "--format") { opts.format = parseFormatFlag(argv[++i], arg, "show"); continue; }
@@ -479,7 +490,7 @@ function parseShowArgs(argv: string[]): ShowOpts {
 
 async function runShow(argv: string[]): Promise<void> {
 	const opts = parseShowArgs(argv);
-	if (!opts.file) { process.stdout.write(helpShow()); process.exit(0); }
+	if (!opts.file) { printHelp(helpShow); process.exit(0); }
 	const isTTY = opts.output ? false : (process.stdout.isTTY ?? false);
 	const color = resolveColor(opts.color, isTTY);
 	const format = resolveOutputFormat(opts.format, isTTY);
@@ -551,7 +562,7 @@ function parseConvertArgs(argv: string[]): ConvertOpts {
 	const positional: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
-		if (arg === "-h" || arg === "--help") { process.stdout.write(helpConvert()); process.exit(0); }
+		if (arg === "-h" || arg === "--help") { printHelp(helpConvert); process.exit(0); }
 		if (arg === "--from") { opts.from = parseInputFormatFlag(argv[++i], arg, "convert"); continue; }
 		if (arg === "--to") { opts.to = parseInputFormatFlag(argv[++i], arg, "convert"); continue; }
 		if (arg === "--tune-index-threshold") { opts.tuneIndex = parseIntFlag(argv[++i], arg, "convert"); continue; }
@@ -674,7 +685,7 @@ async function runInspect(argv: string[]): Promise<void> {
 	let gotFile = false;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
-		if (arg === "-h" || arg === "--help") { process.stdout.write(helpInspect()); process.exit(0); }
+		if (arg === "-h" || arg === "--help") { printHelp(helpInspect); process.exit(0); }
 		if (arg === "--no-color") { color = false; continue; }
 		if (arg === "-o" || arg === "--output") {
 			const v = argv[++i]; if (!v) fail("inspect", `${arg} requires a value`);
@@ -686,7 +697,7 @@ async function runInspect(argv: string[]): Promise<void> {
 		file = arg; gotFile = true;
 	}
 	if (!gotFile) file = process.stdin.isTTY ? "" : "-";
-	if (!file) { process.stdout.write(helpInspect()); process.exit(0); }
+	if (!file) { printHelp(helpInspect); process.exit(0); }
 	const isTTY = output ? false : (process.stdout.isTTY ?? false);
 	const useColor = resolveColor(color, isTTY);
 	applyTheme(useColor);
@@ -718,13 +729,13 @@ async function runStats(argv: string[]): Promise<void> {
 	let file = "";
 	let gotFile = false;
 	for (const arg of argv) {
-		if (arg === "-h" || arg === "--help") { process.stdout.write(helpStats()); process.exit(0); }
+		if (arg === "-h" || arg === "--help") { printHelp(helpStats); process.exit(0); }
 		if (arg.startsWith("-") && arg !== "-") fail("stats", `unknown option: ${arg}`);
 		if (gotFile) fail("stats", "takes only one input");
 		file = arg; gotFile = true;
 	}
 	if (!gotFile) file = process.stdin.isTTY ? "" : "-";
-	if (!file) { process.stdout.write(helpStats()); process.exit(0); }
+	if (!file) { printHelp(helpStats); process.exit(0); }
 	const parsed = await readSource(file);
 	const jsonBytes = new TextEncoder().encode(JSON.stringify(parsed.value)).length;
 	const rxBytes = parsed.rxBytes ? parsed.rxBytes.length : new TextEncoder().encode(stringify(parsed.value)).length;
@@ -755,7 +766,7 @@ Useful for learning what the formats look like.
 
 async function runDemo(argv: string[]): Promise<void> {
 	for (const arg of argv) {
-		if (arg === "-h" || arg === "--help") { process.stdout.write(helpDemo()); process.exit(0); }
+		if (arg === "-h" || arg === "--help") { printHelp(helpDemo); process.exit(0); }
 		fail("demo", `unknown argument: ${arg}`);
 	}
 	const color = resolveColor(undefined, process.stdout.isTTY ?? false);
@@ -867,7 +878,7 @@ const SUBCOMMANDS = ["show", "convert", "inspect", "stats", "demo", "completions
 
 async function runCompletions(argv: string[]): Promise<void> {
 	const sub = argv[0];
-	if (!sub || sub === "-h" || sub === "--help") { process.stdout.write(helpCompletions()); return; }
+	if (!sub || sub === "-h" || sub === "--help") { printHelp(helpCompletions); return; }
 	if (sub === "zsh") { process.stdout.write(ZSH_COMPLETION + "\n"); return; }
 	if (sub === "bash") { process.stdout.write(BASH_COMPLETION + "\n"); return; }
 	if (sub === "install") { await installCompletions(argv[1] as Shell | undefined); return; }
@@ -1017,20 +1028,20 @@ ${tH2}ADVANCED COMMANDS${tR}
 }
 
 function runHelp(argv: string[]): void {
-	if (argv.length === 0) { process.stdout.write(helpTop()); return; }
+	if (argv.length === 0) { printHelp(helpTop); return; }
 	const topic = argv[0];
-	if (topic === "--all" || topic === "-a") { process.stdout.write(helpAll()); return; }
+	if (topic === "--all" || topic === "-a") { printHelp(helpAll); return; }
 	const helps: Record<string, () => string> = {
 		show: helpShow, convert: helpConvert,
 		inspect: helpInspect, stats: helpStats, demo: helpDemo,
-		completions: helpCompletions, help: () => helpTop(),
+		completions: helpCompletions, help: helpTop,
 	};
 	const h = helps[topic!];
 	if (!h) {
 		const hint = suggest(topic!, SUBCOMMANDS);
 		fail("help", `unknown command '${topic}'`, hint ? `did you mean '${hint}'?` : `known: ${SUBCOMMANDS.join(", ")}`);
 	}
-	process.stdout.write(h());
+	printHelp(h);
 }
 
 // ── Main dispatcher ──────────────────────────────────────────────────────────
@@ -1062,18 +1073,14 @@ async function main(): Promise<void> {
 
 	// Global --help / -h → top-level help
 	if (first === "-h" || first === "--help") {
-		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
-		process.stdout.write(helpTop());
+		printHelp(helpTop);
 		return;
 	}
 
 	// Explicit subcommand
 	if (first === "show") return runShow(argv.slice(1));
 	if (first === "convert") return runConvert(argv.slice(1));
-	if (first === "help") {
-		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
-		return runHelp(argv.slice(1));
-	}
+	if (first === "help") return runHelp(argv.slice(1));
 	if (first === "inspect") return runInspect(argv.slice(1));
 	if (first === "stats") return runStats(argv.slice(1));
 	if (first === "demo") return runDemo(argv.slice(1));
@@ -1081,8 +1088,7 @@ async function main(): Promise<void> {
 
 	// No args: show from stdin if piped, else print help
 	if (first === undefined) {
-		applyTheme(resolveColor(undefined, process.stdout.isTTY ?? false));
-		if (process.stdin.isTTY) { process.stdout.write(helpTop()); return; }
+		if (process.stdin.isTTY) { printHelp(helpTop); return; }
 		return runShow(["-"]);
 	}
 

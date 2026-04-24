@@ -1,6 +1,6 @@
 {
 	"name": "@creationix/rx",
-	"version": "0.9.1",
+	"version": "0.9.2",
 	"description": "REXC encoder, decoder, and CLI data tool",
 	"keywords": [
 		"rexc",

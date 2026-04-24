@@ -112,6 +112,39 @@ describe("rx --version / --help", () => {
 		}
 	});
 
+	// Without FORCE_COLOR, subprocess stdout isn't a TTY → both paths render
+	// un-colored and the equality above is met trivially. These tests force
+	// color on to verify both paths actually apply the theme.
+	test("FORCE_COLOR: top-level help emits ANSI codes", () => {
+		const r = run(["--help"], undefined, { FORCE_COLOR: "1", NO_COLOR: "" });
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout).toMatch(/\x1b\[/);
+	});
+
+	test("FORCE_COLOR: subcommand --help emits ANSI codes", () => {
+		const r = run(["show", "--help"], undefined, { FORCE_COLOR: "1", NO_COLOR: "" });
+		expect(r.exitCode).toBe(0);
+		expect(r.stdout).toMatch(/\x1b\[/);
+	});
+
+	test("FORCE_COLOR: `rx SUB --help` and `rx help SUB` are byte-identical", () => {
+		for (const sub of ["show", "convert"]) {
+			const a = run([sub, "--help"], undefined, { FORCE_COLOR: "1", NO_COLOR: "" });
+			const b = run(["help", sub], undefined, { FORCE_COLOR: "1", NO_COLOR: "" });
+			expect(a.stdout).toBe(b.stdout);
+			expect(a.stdout).toMatch(/\x1b\[/); // confirm it's actually colored
+		}
+	});
+
+	test("NO_COLOR takes precedence over TTY but FORCE_COLOR beats both", () => {
+		// NO_COLOR alone → no color even with FORCE_COLOR unset (TTY is false in subprocess)
+		const r1 = run(["--help"], undefined, { NO_COLOR: "1" });
+		expect(r1.stdout).not.toMatch(/\x1b\[/);
+		// FORCE_COLOR wins against NO_COLOR
+		const r2 = run(["--help"], undefined, { FORCE_COLOR: "1", NO_COLOR: "1" });
+		expect(r2.stdout).toMatch(/\x1b\[/);
+	});
+
 	test("`get` is no longer a subcommand", () => {
 		const r = run(["help", "get"]);
 		expect(r.exitCode).toBe(2);
