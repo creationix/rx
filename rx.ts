@@ -194,8 +194,11 @@ const ENCODE_DEFAULTS = {
 // ── Number helpers ──
 
 function trimZeroes(str: string): [number, number] {
-  const trimmed = str.replace(/0+$/, "");
-  return [parseInt(trimmed, 10), str.length - trimmed.length];
+  // Manual scan avoids the /0+$/ regex allocation and state machine overhead.
+  let end = str.length;
+  while (end > 0 && str.charCodeAt(end - 1) === 48) end--;
+  const trimmed = end === str.length ? str : str.substring(0, end);
+  return [parseInt(trimmed, 10), str.length - end];
 }
 
 export function splitNumber(val: number): [number, number] {
@@ -298,34 +301,16 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   const chainDelimSet = new Uint8Array(128);
   for (let i = 0; i < chainDelimiter.length; i++) chainDelimSet[chainDelimiter.charCodeAt(i)] = 1;
 
-  function hasDelimiter(s: string, from: number): boolean {
-    for (let i = from; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      if (c < 128 && chainDelimSet[c]!) return true;
-    }
-    return false;
-  }
-
-  function lastDelimiterPos(s: string, before: number): number {
-    for (let i = before; i >= 0; i--) {
-      const c = s.charCodeAt(i);
-      if (c < 128 && chainDelimSet[c]!) return i;
-    }
-    return -1;
-  }
-
-  function nextDelimiterPos(s: string, after: number): number {
-    for (let i = after; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      if (c < 128 && chainDelimSet[c]!) return i;
-    }
-    return -1;
-  }
-
   const refs = new Map<unknown, string>();
   for (const [key, val] of Object.entries({ ...opts.refs })) {
     refs.set(makeKey(val), key);
   }
+  // seen: Map<key, packed>. Packed encodes offset + cost into a single number.
+  // layout: packed = offset * COST_BASE + cost, where COST_BASE = 2^20.
+  // This assumes cost < 2^20 (1 MB) — true for all practical node sizes.
+  // For offset up to 2^33 (8 GB), total packed stays within Number.MAX_SAFE_INTEGER (2^53).
+  const COST_BASE = 1 << 20; // 1048576
+  const seen = new Map<unknown, number>();
   const seenOffsets = new Map<unknown, number>();
   // Schema trie: nested objects keyed by individual key names, avoids join() allocation.
   // Terminal nodes store the offset under a Symbol key to avoid conflicts with real keys.
@@ -383,13 +368,32 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   // Write tag byte + b64 digits directly into buf — no intermediate string.
 
   function b64Width(num: number): number {
-    if (num === 0) return 0;
-    let w = 0;
-    while (num > 0) { w++; num = Math.trunc(num / 64); }
+    // Branchy fast path: b64 digit width for non-negative integer.
+    if (num < 64) return num === 0 ? 0 : 1;
+    if (num < 4096) return 2;
+    if (num < 262144) return 3;
+    if (num < 16777216) return 4;
+    if (num < 1073741824) return 5;
+    // Fallback for very large values
+    let w = 5;
+    num = Math.floor(num / 1073741824);
+    while (num > 0) { w++; num = Math.floor(num / 64); }
     return w;
   }
 
   function emitUnsigned(tag: number, value: number) {
+    // Fast path: single-digit (most common — lengths/deltas under 64)
+    if (value < 64) {
+      ensureCapacity(2);
+      buf[off] = tag;
+      if (value === 0) {
+        pos += 1; off += 1;
+      } else {
+        buf[off + 1] = b64encodeTable[value]!;
+        pos += 2; off += 2;
+      }
+      return pos;
+    }
     const w = b64Width(value);
     ensureCapacity(w + 1);
     buf[off] = tag;
@@ -448,7 +452,8 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     if (Array.isArray(val)) {
       for (let i = 0; i < val.length; i++) c += prescan(val[i]);
     } else {
-      for (const k in val) c += 1 + prescan((val as any)[k]);
+      const keys = Object.keys(val);
+      for (let i = 0; i < keys.length; i++) c += 1 + prescan((val as any)[keys[i]!]);
     }
     if (c < complexityLimit) simpleValues.add(val);
     return c;
@@ -561,50 +566,75 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     }
   }
 
-  function isASCII(str: string): boolean {
-    for (let i = 0; i < str.length; i++) {
-      if (str.charCodeAt(i) > 127) return false;
-    }
-    return true;
-  }
-
   function writeString(value: string) {
-    if (knownPrefixes && value.length > chainThreshold && hasDelimiter(value, 1)) {
-      // Try to split at a prefix we've seen before
-      let offset = value.length;
-      while (offset > 0) {
-        offset = lastDelimiterPos(value, offset - 1);
-        if (offset <= 0) break;
-        if (prefixLengths!.has(offset)) {
-          const prefix = value.slice(0, offset);
-          if (knownPrefixes.has(prefix)) {
-            const before = pos;
-            writeAny(value.substring(offset));
-            writeAny(prefix);
-            return emitUnsigned(TAG_DOT, pos - before);
-          }
-        }
+    if (knownPrefixes && value.length > chainThreshold) {
+      // Find the last delimiter position (if any) in a single reverse pass.
+      // If no delimiter exists, skip the whole chain block — no allocations.
+      const vlen = value.length;
+      let lastDelim = -1;
+      for (let i = vlen - 1; i >= 1; i--) {
+        const c = value.charCodeAt(i);
+        if (c < 128 && chainDelimSet[c]!) { lastDelim = i; break; }
       }
-      // No match — register this string's prefixes for future splits
-      offset = 0;
-      while (offset < value.length) {
-        const next = nextDelimiterPos(value, offset + 1);
-        if (next === -1) break;
-        knownPrefixes.add(value.slice(0, next));
-        prefixLengths!.add(next);
-        offset = next;
+      if (lastDelim > 0) {
+        // Walk delimiters right-to-left looking for a registered prefix.
+        let offset = lastDelim;
+        while (offset > 0) {
+          if (prefixLengths!.has(offset)) {
+            const prefix = value.slice(0, offset);
+            if (knownPrefixes.has(prefix)) {
+              const before = pos;
+              writeAny(value.substring(offset));
+              writeAny(prefix);
+              return emitUnsigned(TAG_DOT, pos - before);
+            }
+          }
+          // find next delimiter to the left
+          let prev = -1;
+          for (let i = offset - 1; i >= 1; i--) {
+            const c = value.charCodeAt(i);
+            if (c < 128 && chainDelimSet[c]!) { prev = i; break; }
+          }
+          if (prev <= 0) break;
+          offset = prev;
+        }
+        // No match — register this string's prefixes for future splits (left-to-right).
+        offset = 0;
+        while (offset < vlen) {
+          let next = -1;
+          for (let i = offset + 1; i < vlen; i++) {
+            const c = value.charCodeAt(i);
+            if (c < 128 && chainDelimSet[c]!) { next = i; break; }
+          }
+          if (next === -1) break;
+          knownPrefixes.add(value.slice(0, next));
+          prefixLengths!.add(next);
+          offset = next;
+        }
       }
     }
     const len = value.length;
-    // Fast path: ASCII strings can be written byte-by-byte, no encodeInto needed
-    if (len < 128 && isASCII(value)) {
-      ensureCapacity(len + 16);
+    // Fast path: attempt single-pass ASCII write, fall through to TextEncoder
+    // if we encounter a non-ASCII char. For short strings (<128 chars), most
+    // real-world strings are pure ASCII and this avoids a separate scan pass.
+    if (len < 128) {
+      ensureCapacity(len * 3 + 16);
+      let ok = true;
       for (let i = 0; i < len; i++) {
-        buf[off + i] = value.charCodeAt(i);
+        const c = value.charCodeAt(i);
+        if (c > 127) { ok = false; break; }
+        buf[off + i] = c;
       }
-      pos += len;
-      off += len;
-      return emitUnsigned(TAG_COMMA, len);
+      if (ok) {
+        pos += len;
+        off += len;
+        return emitUnsigned(TAG_COMMA, len);
+      }
+      // Fall back to TextEncoder — buffer already ensured
+      const result = textEncoder.encodeInto(value, buf.subarray(off));
+      pos += result.written;
+      off += result.written;
+      return emitUnsigned(TAG_COMMA, result.written);
     }
     const maxBytes = len * 3;
     ensureCapacity(maxBytes + 16);
@@ -660,13 +690,17 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
 
   function writeValues(values: unknown[]) {
     const length = values.length;
-    const offsets = length > indexThreshold ? new Array(length) : undefined;
-    for (let i = length - 1; i >= 0; i--) {
-      writeAny(values[i]);
-      if (offsets) offsets[i] = pos;
-    }
-    if (offsets) {
+    if (length > indexThreshold) {
+      const offsets = new Array<number>(length);
+      for (let i = length - 1; i >= 0; i--) {
+        writeAny(values[i]);
+        offsets[i] = pos;
+      }
       writeIndex(offsets, length);
+    } else {
+      for (let i = length - 1; i >= 0; i--) {
+        writeAny(values[i]);
+      }
     }
   }
 
@@ -675,38 +709,69 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     const length = keys.length;
     if (length === 0) return pushASCII(":");
 
-    const schemaLeaf = schemaUpsert(keys);
+    // Inline schemaUpsert: walk/create trie nodes for this key sequence.
+    let schemaLeaf: SchemaTrie = schemaTrie;
+    for (let i = 0; i < length; i++) {
+      const k = keys[i]!;
+      schemaLeaf = schemaLeaf[k] ??= Object.create(null);
+    }
     const schemaTarget = schemaLeaf[SCHEMA_OFFSET];
-    if (schemaTarget !== undefined) return writeSchemaObject(value, schemaTarget);
+    if (schemaTarget !== undefined) return writeSchemaObject(value, schemaTarget, keys);
 
     const before = pos;
-    const offsets = length > indexThreshold ? ({} as Record<string, number>) : undefined;
-    let lastOffset: number | undefined;
-    const entries = Object.entries(value);
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const [key, val] = entries[i] as [string, unknown];
-      writeAny(val);
-      writeAny(key);
-      if (offsets) {
-        offsets[key] = pos;
-        lastOffset = lastOffset ?? pos;
+    const needsIndex = length > indexThreshold;
+
+    if (needsIndex) {
+      // Pre-compute sorted order for index: sort key indices by UTF-8 order
+      const sortedIndices = new Array<number>(length);
+      for (let i = 0; i < length; i++) sortedIndices[i] = i;
+      sortedIndices.sort((a, b) => utf8Sort(keys![a]!, keys![b]!));
+
+      // Write entries in reverse insertion order, recording offset per key index
+      const keyOffsets = new Array<number>(length);
+      for (let i = length - 1; i >= 0; i--) {
+        const key = keys[i]!;
+        writeAny(value[key]);
+        writeAny(key);
+        keyOffsets[i] = pos;
+      }
+
+      // Build sorted offsets array for index
+      const sortedOffsets = new Array<number>(length);
+      for (let i = 0; i < length; i++) {
+        sortedOffsets[i] = keyOffsets[sortedIndices[i]!]!;
+      }
+      writeIndex(sortedOffsets, length);
+    } else {
+      // Small object — no index needed; iterate keys directly (no Object.entries tuple alloc)
+      for (let i = length - 1; i >= 0; i--) {
+        const key = keys[i]!;
+        writeAny(value[key]);
+        writeAny(key);
       }
     }
 
-    if (offsets && lastOffset !== undefined) {
-      const sortedOffsets = Object.entries(offsets)
-        .sort(utf8SortEntries)
-        .map(entryValue) as number[];
-      writeIndex(sortedOffsets, length);
-    }
     const ret = emitUnsigned(TAG_COLON, pos - before);
     schemaLeaf[SCHEMA_OFFSET] = pos;
     return ret;
   }
 
-  function writeSchemaObject(value: Record<string, unknown>, target: string | number) {
+  function writeSchemaObject(value: Record<string, unknown>, target: string | number, keys: string[]) {
     const before = pos;
-    writeValues(Object.values(value));
+    const length = keys.length;
+    // Inline writeValues logic to avoid building Object.values() array
+    if (length > indexThreshold) {
+      const offsets = new Array<number>(length);
+      for (let i = length - 1; i >= 0; i--) {
+        writeAny(value[keys[i]!]);
+        offsets[i] = pos;
+      }
+      writeIndex(offsets, length);
+    } else {
+      for (let i = length - 1; i >= 0; i--) {
+        writeAny(value[keys[i]!]);
+      }
+    }
     if (typeof target === "string") pushASCII(`'${target}`);
     else emitUnsigned(TAG_CARET, pos - target);
     return emitUnsigned(TAG_COLON, pos - before);
