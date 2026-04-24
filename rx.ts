@@ -305,13 +305,14 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   for (const [key, val] of Object.entries({ ...opts.refs })) {
     refs.set(makeKey(val), key);
   }
-  // seen: Map<key, packed>. Packed encodes offset + cost into a single number.
-  // layout: packed = offset * COST_BASE + cost, where COST_BASE = 2^20.
-  // This assumes cost < 2^20 (1 MB) — true for all practical node sizes.
-  // For offset up to 2^33 (8 GB), total packed stays within Number.MAX_SAFE_INTEGER (2^53).
-  const COST_BASE = 1 << 20; // 1048576
+  // seen: Map<key, packed> where packed = offset * COST_BASE + cost.
+  // One Map lookup replaces the two needed with separate offset/cost maps,
+  // halving tryDedup/recordDedup hot-path cost.
+  // COST_BASE = 2^20 (1 MB) caps per-node cost; the rare overflow spills to seenBig.
+  // offset * COST_BASE stays safe-integer for offsets up to 2^33 (8 GB output).
+  const COST_BASE = 1 << 20;
   const seen = new Map<unknown, number>();
-  const seenOffsets = new Map<unknown, number>();
+  const seenBig = new Map<unknown, number>();
   // Schema trie: nested objects keyed by individual key names, avoids join() allocation.
   // Terminal nodes store the offset under a Symbol key to avoid conflicts with real keys.
   const SCHEMA_OFFSET: unique symbol = Symbol();
@@ -327,8 +328,6 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     }
     return node;
   }
-  const seenCosts = new Map<unknown, number>();
-
   // ── Chunked buffer ──
   // Both streaming and non-streaming use the same write path.
   // ensureCapacity flushes the current chunk when full.
@@ -438,7 +437,6 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   // Each object's key is built from its children's cached keys — no JSON.stringify needed.
   // Objects over COMPLEXITY_LIMIT get no key (too expensive to dedup structurally).
   // Pre-scan: compute recursive complexity for every object/array, bottom-up.
-  // Memoized in WeakMap — O(1) lookup during encode.
   // Pre-scan: mark objects/arrays with complexity below COMPLEXITY_LIMIT as
   // eligible for structural dedup via JSON.stringify. Only simple values are
   // stored in the set — complex values are skipped during encoding.
@@ -491,10 +489,13 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   // Try to emit a back-reference pointer if we've seen this key before.
   // Returns true if a pointer was emitted.
   function tryDedup(key: unknown): boolean {
-    const seenOffset = seenOffsets.get(key);
-    if (seenOffset === undefined) return false;
-    const delta = pos - seenOffset;
-    const seenCost = seenCosts.get(key) ?? 0;
+    const packed = seen.get(key);
+    if (packed === undefined) return false;
+    const offset = Math.floor(packed / COST_BASE);
+    let seenCost = packed - offset * COST_BASE;
+    // cost === 0 sentinel: real cost overflowed COST_BASE, look it up in seenBig
+    if (seenCost === 0) seenCost = seenBig.get(key) ?? 0;
+    const delta = pos - offset;
     if (b64Width(delta) + 1 < seenCost) {
       emitUnsigned(TAG_CARET, delta);
       return true;
@@ -504,8 +505,13 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
 
   // Record this key's offset and encoded cost for future dedup.
   function recordDedup(key: unknown, before: number) {
-    seenOffsets.set(key, pos);
-    seenCosts.set(key, pos - before);
+    const cost = pos - before;
+    if (cost < COST_BASE) {
+      seen.set(key, pos * COST_BASE + cost);
+    } else {
+      seen.set(key, pos * COST_BASE);
+      seenBig.set(key, cost);
+    }
   }
 
   function writeAny(value: unknown) {
