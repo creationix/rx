@@ -525,10 +525,13 @@ ${tH2}ARGUMENTS${tR}
 ${tH2}OPTIONS${tR}
   ${tCmd}--from${tR} ${tArg}FMT${tR}                       Input format: ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
   ${tCmd}--to${tR} ${tArg}FMT${tR}                         Output format: ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
-  ${tCmd}--tune-index-threshold${tR} ${tArg}N${tR}         Index objects/arrays larger than N ${tDim}(default: ${INDEX_THRESHOLD})${tR}
+  ${tCmd}--tune-index-threshold${tR} ${tArg}N${tR}         Index objects/arrays with body bytes >= N ${tDim}(default: ${INDEX_THRESHOLD})${tR}
   ${tCmd}--tune-chain-threshold${tR} ${tArg}N${tR}         Split strings longer than N ${tDim}(default: ${STRING_CHAIN_THRESHOLD})${tR}
   ${tCmd}--tune-chain-delimiter${tR} ${tArg}S${tR}         Delimiters for chain splitting ${tDim}(default: ${STRING_CHAIN_DELIMITER})${tR}
   ${tCmd}--tune-dedup-limit${tR} ${tArg}N${tR}             Max node count for structural dedup ${tDim}(default: ${DEDUP_COMPLEXITY_LIMIT})${tR}
+  ${tCmd}--min-index-depth${tR} ${tArg}N${tR}              Containers shallower than depth N always get an index ${tDim}(default: 0)${tR}
+  ${tCmd}--max-index-depth${tR} ${tArg}N${tR}              Containers at depth N or deeper never get an index ${tDim}(default: ∞)${tR}
+                                       Root is depth 0. Use ${tArg}--min-index-depth 1 --max-index-depth 1${tR} to index only the root.
   ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
 
 ${tH2}EXAMPLES${tR}
@@ -555,6 +558,8 @@ type ConvertOpts = {
 	tuneChain?: number;
 	tuneDelim?: string;
 	tuneDedup?: number;
+	minIndexDepth?: number;
+	maxIndexDepth?: number;
 };
 
 function parseConvertArgs(argv: string[]): ConvertOpts {
@@ -572,6 +577,8 @@ function parseConvertArgs(argv: string[]): ConvertOpts {
 			opts.tuneDelim = v; continue;
 		}
 		if (arg === "--tune-dedup-limit") { opts.tuneDedup = parseIntFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "--min-index-depth") { opts.minIndexDepth = parseIntFlag(argv[++i], arg, "convert"); continue; }
+		if (arg === "--max-index-depth") { opts.maxIndexDepth = parseIntFlag(argv[++i], arg, "convert"); continue; }
 		if (arg === "-") { positional.push("-"); continue; }
 		if (arg.startsWith("-")) fail("convert", `unknown option: ${arg}`, `run 'rx convert --help' for usage`);
 		positional.push(arg);
@@ -613,10 +620,18 @@ async function runConvert(argv: string[]): Promise<void> {
 	});
 
 	const parsed = await readSource(opts.src, inFmt);
-	const bytes = render(parsed.value, outFmt, false, 80);
-	// render() adds a newline for text formats; for rxb and stdout-piped rx, that's fine.
-	// For file writes in rxb we want raw bytes:
-	const toWrite = outFmt === "rxb" ? rxbEncode(parsed.value) : bytes;
+	let toWrite: Uint8Array;
+	if (outFmt === "rxb") {
+		toWrite = rxbEncode(parsed.value);
+	} else if (outFmt === "rx") {
+		const text = stringify(parsed.value, {
+			minIndexDepth: opts.minIndexDepth,
+			maxIndexDepth: opts.maxIndexDepth,
+		});
+		toWrite = new TextEncoder().encode(text + "\n");
+	} else {
+		toWrite = render(parsed.value, outFmt, false, 80);
+	}
 	if (opts.dst === "-") process.stdout.write(toWrite);
 	else await writeFile(opts.dst, toWrite);
 }

@@ -1,148 +1,131 @@
 # RX Format Spec
 
-This document is the formal grammar and encoding reference for the `.rx` text format used by `@creationix/rx`. It is intended to make the format understandable **without reading the source code**.
+RX is a compact text encoding for JSON-shaped data — objects, arrays, strings, numbers, booleans, `null`. Pointers, chains, refs, and indexes add structural sharing and random access without changing what values can be represented.
 
-RX covers the same data model as JSON: maps, lists, strings, numbers, booleans, and `null`. Pointers, chains, refs, and indexes are encoding features that make large documents smaller and faster to query.
+RX is the data-layer subset of [REXC bytecode](https://github.com/creationix/rex/blob/rusty/docs/rexc-bytecode.md). REXC adds program-execution tags (variables, opcodes, calls, control flow) on top; every valid RX document is a valid REXC document.
 
-> For interactive inspection, paste any RX or JSON into the live viewer at **[rx.run](https://rx.run/)**.
+> Paste RX or JSON into **[rx.run](https://rx.run/)** for interactive inspection.
 
 ---
 
-## Reading direction
+## Parsing model
 
-RX is parsed **right-to-left**. Every value has a **tag** character with a **base64 varint** to its right, and may have a **body** to its left:
+RX is parsed **right-to-left**. Every value has a **tag** character with a **b64 varint** to its right, and optionally a **body** to its left:
 
 ```text
 [body][tag][b64 varint]
-            ◄── read this way ──
+           ◄── read this way ──
 ```
 
-The parser starts at the rightmost byte and scans left past base64 digits until it hits a non-b64 byte — that byte is the tag. The b64 digits to its right are the varint. The tag then determines whether there is a body to the left and how to interpret it.
+The parser scans left past b64 digits until it hits a non-b64 byte — that byte is the tag. The tag determines how to interpret the varint and whether a body sits to its left.
 
-**Worked example** — parsing `hi,2`:
+The three container tags (`]` `}` `>`) are paired: the parser reads child values right-to-left until it hits the matching opener (`[` `{` `<`).
 
-1. Start at the right: `2` is a b64 digit → varint = 2
-2. Next byte left: `,` is not a b64 digit → **tag** (string)
-3. The tag says there are 2 bytes of body to the left → `hi`
+### Tags
 
----
+| Tag     | Name    | Layout               | Varint meaning          |
+|---------|---------|----------------------|-------------------------|
+| `+`     | Integer | `+[varint]`          | zigzag signed           |
+| `*`     | Decimal | `[+base]*[varint]`   | zigzag exponent         |
+| `,`     | String  | `[utf8],[varint]`    | byte length             |
+| `'`     | Ref     | `'[name]`            | b64 name (not a number) |
+| `^`     | Pointer | `^[varint]`          | byte offset delta       |
+| `[` `]` | Array   | `[children]`         | — (paired)              |
+| `{` `}` | Object  | `{children}`         | — (paired)              |
+| `<` `>` | Chain   | `<segments>`         | — (paired)              |
+| `.`     | Schema  | `[keys].[varint]`    | byte length             |
+| `#`     | Index   | `[entries]#[varint]` | packed count+width      |
+| `@`     | Bytes   | `[b64body]@[varint]` | byte length of body     |
 
-## Grammar overview
+Eleven tag characters total (`]` `}` `>` are the tags; `[` `{` `<` are end markers for the container scan).
 
-A **value** is one of:
+### Worked example
 
-```ebnf
-value = number | string | ref | list | map | pointer | chain ;
-```
+Parse `[world,5hi,2]` right-to-left:
 
-### Tags at a glance
+| Scan       | Tag | Varint | Action                          |
+|------------|-----|--------|---------------------------------|
+| `…]`       | `]` | —      | array open; read children       |
+| `…hi,2`    | `,` | `2`    | read 2 bytes left → `"hi"`      |
+| `…world,5` | `,` | `5`    | read 5 bytes left → `"world"`   |
+| `[…`       | `[` | —      | array close → `["hi", "world"]` |
 
-| Tag     | Name    | Layout                          | Description                              |
-|---------|---------|---------------------------------|------------------------------------------|
-| **`+`** | Number  | `+[b64 zigzag]`                 | Zigzag-decoded signed integer            |
-| **`*`** | Decimal | `[base]+[b64 base]*[b64 exp]`   | `base × 10^exp`                          |
-| **`,`** | String  | `[UTF-8 bytes],[b64 length]`    | Raw UTF-8, length in bytes               |
-| **`'`** | Ref     | `'[name]`                       | Built-in literal or external ref name    |
-| **`;`** | List    | `[children];[b64 content-size]` | Ordered child values                     |
-| **`:`** | Map     | `[children]:[b64 content-size]` | Key/value pairs                          |
-| **`^`** | Pointer | `^[b64 delta]`                  | Backward delta to an earlier byte offset |
-| **`.`** | Chain   | `[segments].[b64 content-size]` | Concatenated string segments             |
-| **`#`** | Index   | `[entries]#[b64 compound]`      | Sorted lookup table for a container      |
+Children are written in reverse byte order so that R-to-L parsing yields them in natural forward order.
+
+### Why right-to-left
+
+The root of a document is its rightmost byte. Appending bytes to the right produces a new valid document whose root is the new content — and pointers in the appended bytes can reference any earlier byte via a backward delta. This makes RX naturally append-only: revisions deduplicate against all prior bytes for free, with no rewriting.
+
+It also keeps encoding simple: the encoder writes left-to-right via depth-first, post-order traversal.
 
 ---
 
 ## Building blocks
 
-### B64
+### B64 alphabet
 
-```ebnf
-b64
-  = "0" | "1" | "2" | "3" | "4" | "5" | "6"
-  | "7" | "8" | "9" | "a" | "b" | "c" | "d"
-  | "e" | "f" | "g" | "h" | "i" | "j" | "k"
-  | "l" | "m" | "n" | "o" | "p" | "q" | "r"
-  | "s" | "t" | "u" | "v" | "w" | "x" | "y"
-  | "z" | "A" | "B" | "C" | "D" | "E" | "F"
-  | "G" | "H" | "I" | "J" | "K" | "L" | "M"
-  | "N" | "O" | "P" | "Q" | "R" | "S" | "T"
-  | "U" | "V" | "W" | "X" | "Y" | "Z" | "-"
-  | "_"
-  ;
+```
+0-9 a-z A-Z - _
 ```
 
-RX uses the alphabet **`0-9 a-z A-Z - _`** (64 characters, URL-safe, no padding) for variable-length unsigned integers.
+64 URL-safe characters, ordering extends hexadecimal.
 
 ### Varint
 
-```ebnf
-varint = { b64 } ;
-```
+Zero or more b64 digits, big-endian. **Zero is the empty string.** Signed values use zigzag on top: `0 → 0, -1 → 1, 1 → 2, -2 → 3, …`.
 
-A `varint` is zero or more `b64` digits in big-endian order. These are used for unsigned integers, signed integers, and sometimes as string identifiers.
-
-- **Zero** is encoded as an empty string (zero digits)
-- **Signed integers** use zigzag encoding: 0 → 0, -1 → 1, 1 → 2, -2 → 3, ...
-
-| Decimal | Zigzag | B64 digits |
+| Decimal | Zigzag | B64        |
 |---------|--------|------------|
 | 0       | 0      | *(empty)*  |
 | 1       | 2      | `2`        |
 | -1      | 1      | `1`        |
 | 42      | 84     | `1k`       |
-| 255     | 510    | `7-`       |
+| -256    | 511    | `7_`       |
 
 ---
 
 ## Primitives
 
-### Number — `+` `*`
+### Integer `+`
 
-```ebnf
-number = "+" , varint , [ "*" , varint ] ;
-```
+Zigzag-encoded signed integer.
 
-Numbers are encoded as a zigzag signed integer base optionally combined with a zigzag signed power of 10 exponent. When the exponent is small and non-negative, the encoder folds it into the base and omits the `*` suffix.
+| JSON   | RX    |
+|--------|-------|
+| `0`    | `+`   |
+| `1`    | `+2`  |
+| `-1`   | `+1`  |
+| `42`   | `+1k` |
+| `-256` | `+7_` |
 
-Special float values use refs instead: **`'inf`** (+Infinity), **`'nif`** (-Infinity), **`'nan`** (NaN).
+### Decimal `*`
 
-| JSON      | RX      | Base | Exp | Notes                          |
-|-----------|---------|------|-----|--------------------------------|
-| `0`       | `+`     | 0    | —   | zigzag(0) = empty              |
-| `1`       | `+2`    | 1    | —   | zigzag(1) = 2                  |
-| `-1`      | `+1`    | -1   | —   | zigzag(-1) = 1                 |
-| `42`      | `+1k`   | 42   | —   | zigzag(42) = 84 = `1k`         |
-| `255`     | `+7-`   | 255  | —   | zigzag(255) = 510 = `7-`       |
-| `1000`    | `+vg`   | 1000 | —   | small exp, folded into integer |
-| `3.14`    | `+9Q*3` | 314  | -2  | 314 × 10⁻²                     |
-| `-0.5`    | `+9*1`  | -5   | -1  | -5 × 10⁻¹                      |
-| `99.9`    | `+ve*1` | 999  | -1  | 999 × 10⁻¹                     |
-| `1000000` | `+2*c`  | 1    | 6   | 1 × 10⁶                        |
+A decimal requires an adjacent `+` value to its left. The varint to the right of `*` is the zigzag exponent; the `+` value to the left is the base. Value is `base × 10^exp`.
 
-### String — `,`
+Special floats use refs: `'inf` (+∞), `'nif` (−∞), `'nan` (NaN).
 
-```ebnf
-string = utf8_body , "," , varint ;
-```
+| JSON   | RX      | Base | Exp |
+|--------|---------|------|-----|
+| `1000` | `+vg`   | 1000 | —   |
+| `3.14` | `+9Q*3` | 314  | -2  |
+| `-0.5` | `+9*1`  | -5   | -1  |
+| `1e6`  | `+2*c`  | 1    | 6   |
 
-The body contains raw UTF-8 bytes. The varint gives the **byte length** (not character count). Strings may contain any bytes including nulls and non-ASCII unicode.
+### String `,`
 
-| JSON            | RX              | Bytes | Notes                                |
-|-----------------|-----------------|-------|--------------------------------------|
-| `""`            | `,`             | 0     | empty string                         |
-| `"hi"`          | `hi,2`          | 2     |                                      |
-| `"alice"`       | `alice,5`       | 5     |                                      |
-| `"hello world"` | `hello world,b` | 11    | b64(11) = `b`                        |
-| `"café"`        | `café,5`        | 5     | `é` is 2 UTF-8 bytes                 |
-| `"🎉"`          | `🎉,4`          | 4     | emoji is 4 UTF-8 bytes               |
-| `"🏴‍☠️"`          | `🏴‍☠️,d`          | 13    | ZWJ pirate flag: 🏴 + ZWJ + ☠ + VS16 |
+Raw UTF-8 body. The varint is the **byte length** (not character count).
 
-### Ref — `'`
+| JSON            | RX              |
+|-----------------|-----------------|
+| `""`            | `,`             |
+| `"hi"`          | `hi,2`          |
+| `"hello world"` | `hello world,b` |
+| `"café"`        | `café,5`        |
+| `"🎉"`          | `🎉,4`          |
 
-```ebnf
-ref = "'" , ref_name ;
-```
+### Ref `'`
 
-Refs are **unique among tags**: the bytes to the right of `'` are not a numeric value but a *name* composed of b64 digits. The parser checks for built-in names first; non-built-in ref names refer to entries in an external dictionary agreed between encoder and decoder.
+The bytes to the right of `'` form a **name** of b64 characters, not a numeric value. Built-in names resolve to literals (`'t`, `'f`, `'n`, `'u`, `'inf`, `'nif`, `'nan`). Other names are application-defined; they may resolve to a value from a shared external dictionary, or to an opaque host symbol (e.g. a JS `Symbol`, an interned token) that the application uses as an identity marker. The encoder and decoder need only agree on the meaning of each name they use.
 
 | Value       | RX     |
 |-------------|--------|
@@ -158,219 +141,179 @@ Refs are **unique among tags**: the bytes to the right of `'` are not a numeric 
 
 ## Containers
 
-### List — `;`
+Containers use paired delimiters — no length prefix. Children are written in reverse byte order so that R-to-L parsing yields them forward.
 
-```ebnf
-list = { value } , [ index ] , ";" , varint ;
-```
+### Array `[` `]`
 
-Children are written in reverse order so that right-to-left parsing yields them in natural forward order (index 0 first). The varint gives the **total byte size** of the content region.
+Ordered children.
 
-Large lists may include an **index** between the last child and the `;` tag.
+An array may have an optional [index](#index-) at the right end of the body for O(1) random access.
 
-Consider a small array containing 3 integers:
+| JSON                          | RX              |
+|-------------------------------|-----------------|
+| `[]`                          | `[]`            |
+| `[1, 2, 3]`                   | `[+6+4+2]`      |
+| `[1, 2, 3]` with forced index | `[+6+4+2420#o]` |
 
-```json
-[ 1, 2, 3 ]
-```
+### Object `{` `}`
 
-When encoded to RX, this looks like:
+Ordered key/value pairs. Keys are typically strings but may be pointers or chains resolving to strings.
 
-```rx
-+6+4+2;6
-├╯├╯├╯╰┴─ header for 6 byte list
-│ │ ╰──── value 1 as zigzag integer
-│ ╰────── value 2 as zigzag integer
-╰──────── value 3 as zigzag integer
-```
-
-If we configure the encoder to force indexes for short values, it encodes like this:
-
-```rx
-+6+4+2024#o;b
-├╯├╯├╯╰┬╯├╯╰┴─ header for 6 byte list
-│ │ │  │ ╰──── index count=3, width=1
-│ │ │  ╰────── 3 pointers [0, 2, 4]
-│ │ ╰───────── value 1 as zigzag integer
-│ ╰─────────── value 2 as zigzag integer
-╰───────────── value 3 as zigzag integer
-```
-
-### Map — `:`
-
-```ebnf
-map = { value , value } , [ index ] , [ schema ] , ":" , varint ;
-```
-
-Key/value pairs are written in reverse order so that right-to-left parsing yields them in natural insertion order. **Key order is preserved.** Keys are typically strings but may be pointers or chains.
-
-Large maps may include an **index** and/or a **schema** between the last key-value pair and the `:` tag. When both are present, the schema is rightmost, followed by the index.
+An object may have an optional [index](#index-) for O(log n) key lookup, **or** a [schema](#schema) for shape sharing.
 
 | JSON                                    | RX                                   |
 |-----------------------------------------|--------------------------------------|
-| `{}`                                    | `:`                                  |
-| `{"a":1,"b":2}`                         | `+4b,1+2a,1:a`                       |
-| `{"users":["alice","bob"],"version":3}` | `+6version,7bob,3alice,5;cusers,5:w` |
+| `{}`                                    | `{}`                                 |
+| `{"a":1,"b":2}`                         | `{+4b,1+2a,1}`                       |
+| `{"users":["alice","bob"],"version":3}` | `{+6version,7[bob,3alice,5]users,5}` |
+| `{"z":1,"a":2,"m":3}`with forced index  | `{+6m,1+4a,1+2z,10a5#o}`             |
+| `[{"a":1,"b":2},{"a":3,"b":4}]`         | `[{+8+6b,a.3}{+4+2^6}]`              |
+
+### Chain `<` `>`
+
+A concatenated value built from string and bytes segments. Each segment is a string, bytes, a pointer to one of these, or a nested chain.
+
+The result type is determined by segment composition: **if any segment resolves to bytes, the result is bytes** (string segments are taken as their UTF-8 byte representation). Otherwise the result is a string (UTF-8 concatenation).
+
+Chains let scattered values share common substrings or byte sequences via pointers — useful for path-like values (URLs, file paths, identifiers) and for binary protocols where many blobs share a header, signature, IV, or other prefix.
+
+| Value                     | RX                                       |
+|---------------------------|------------------------------------------|
+| `"/docs/getting-started"` | `<getting-started,f/docs/,6>`            |
+| `"/docs/encoding"`        | `<encoding,8^k>` (`^k` → `/docs/` above) |
 
 ---
 
 ## Sharing and random access
 
-### Pointer — `^`
+### Pointer `^`
 
-```ebnf
-pointer = "^" , varint ;
+Backward delta in bytes from the left of the pointer's tag to the target's right edge:
+
+```
+target_right = tag_position - delta
 ```
 
-A pointer refers to an earlier value by **backward delta** — the distance in bytes from the pointer's tag position back to the target value's right edge. To resolve: `target = tag_position - delta`, then read the value at that offset.
+Parse R-to-L from `target_right`. Pointers enable value deduplication, schema sharing, chain prefix sharing, and cross-revision dedup.
 
-Pointers enable:
-- **Value deduplication** — identical strings, maps, or subtrees are written once
-- **Schema sharing** — maps with the same keys reference a shared key layout
+| JSON                                      | RX                     |
+|-------------------------------------------|------------------------|
+| `["word","salad","word","salad","salad"]` | `[salad,5^word,4^7^2]` |
 
-### Chain — `.`
+The first `"salad"` is written once at the left; each duplicate becomes a pointer back to an earlier copy. `^` with an empty varint is a valid pointer with delta 0 — used when the duplicate sits immediately to the right of its source.
 
-```ebnf
-chain = { value } , "." , varint ;
-```
+### Index `#`
 
-A chain is a **concatenated string** built from segments. Each segment is itself a value — typically a string, pointer, or another chain. The varint gives the total byte size of the segments.
+Lookup table for a container, appearing as the rightmost child inside the container body.
 
-Chains compress keys with shared prefixes. For example, `/docs/getting-started` and `/docs/encoding` might share a `/docs/` prefix segment via a pointer, with only the suffix differing.
-
-### Index — `#`
-
-```ebnf
-index = { index_entry } , "#" , varint ;
-index_entry = b64 , { b64 } ;
-```
-
-An index is a lookup table attached to a container (list or map). It appears inside the container body, between the content and the container's tag.
-
-The compound varint packs two values:
+The compound varint packs:
 
 ```
 compound = (count << 3) | (width - 1)
 ```
 
-- **Low 3 bits** → `width - 1` (digits per entry, supporting widths 1–8)
-- **Upper bits** → `count` (number of entries)
+Each entry is a fixed-width b64 backward delta from the **index base** (the right edge of the child immediately to the left of the index). To resolve entry *i*: `target_right = index_base - entry[i]`.
 
-Each entry is a fixed-width base64 number giving the backward delta from the container content boundary (the left edge of the index table) to the corresponding child's right edge. The base is shared by all entries; each delta is not relative to its own pointer position.
+Entries are stored in reverse natural order so that R-to-L scanning yields them forward — the rightmost entry holds the delta for element 0 (arrays) or for the first sorted key (objects). For random access, entry *i* sits at position `ix_tag - (i+1) * width`, where `ix_tag` is the position of the `#` byte.
 
-- **Indexed Lists**: entries point to values in element order. `O(1)` lookup.
+| Container | R-to-L entry order | Access                 |
+|-----------|--------------------|------------------------|
+| Array     | element order      | O(1)                   |
+| Object    | UTF-8 key order    | O(log n) binary search |
 
-  ```js
-  [1,2,3] // Sample array, encoded with forced indices.
-  ```
+Examples:
 
-  The index is `024#o`.  This is 3 pointers `[0,2,4]` and `#o` for the packed config `{width:1,count:3}`.
-
-  ```rx
-  +6+4+2024#o;b
-  ```
-
-  
-- **Indexed Maps**: entries point to keys, sorted in UTF-8 byte order. `O(log2 n)` lookup.
-
-  ```js
-  // Sample object, encoded with forced indices.
-  // Note the keys are not ordered.
-  {z:1,a:2,m:3} 
-  ```
-
-  The index is `5a0#o`.  This is 3 pointers `[5,10,0]` and the same `#o` packed index config.  Note the indexes are not in order. This is because the keys in the index are sorted for fast binary search lookup. But the values in the actual object body preserve original order.
-
-  ```rx
-  +6m,1+4a,1+2z,15a0#o:k
-  ```
-
-- **Schema maps**: keys are external, so index entries point to values like a list. O(1) value lookup + whatever cost the key lookup in the external schema is.
-
-  ```json
-  [{"z":1,"a":2,"m":3},{"z":4,"a":5,"m":6}]
-  ```
-
-  This was encoded with indices on all containers
-
-  - `0f#g` on the outer list.  Offsets `[0,15]` config `{count:2,width:1}`.
-  - `024#o^b` is pointer to right object with shared keys and index to local values list.
-  - `5a0#o` on the left object pointing to keys in sorted order.
-
-  ```rx
-  +cm,1+aa,1+8z,15a0#o:k+6+4+2024#o^b:d0f#g;F
-  ```
-
-  In this document, one map provides the key layout and the other map stores only values plus a schema pointer.
-
-**Indexes enable:**
-- **O(1) list access** — jump directly to the *N*th element
-- **O(log n) key lookup** on non-schema maps — binary search on sorted keys
-- **O(log n + m) prefix search** on non-schema maps — find the first matching key, then scan forward
-- **O(1) value access by position** on schema maps
-
-Without an index, list access and key lookup are O(n) linear scans.
+```
+[+6+4+2420#o]           → [1, 2, 3]          R-to-L deltas [0, 2, 4], width 1
+{+6m,1+4a,1+2z,10a5#o}  → {z:1, a:2, m:3}    R-to-L sorted by key (body keeps insertion order)
+```
 
 ### Schema
 
-Maps can store their keys **separately from their values** using a schema reference. This is useful when many maps share the same key set (e.g., rows in a table-like structure).
+The schema tag `.` encodes a comma-delimited list of keys as the body. The varint is the body's byte length, same as a string.
 
-```ebnf
-schema = pointer | ref ;
+Keys are stored in **reverse natural order** so that scanning the body R-to-L for delimiters yields keys in lockstep with R-to-L value parsing — the parser pairs each key with the next value as it goes.
+
+| Keys                  | RX schema        |
+|-----------------------|------------------|
+| `["a"]`               | `a.1`            |
+| `["a", "b"]`          | `b,a.3`          |
+| `["color", "fruits"]` | `fruits,color.c` |
+
+A schema object stores only its values, with a schema reference as its rightmost child — either an inline schema (`.`) or a pointer (`^`) that resolves to one.
+
+A schema object cannot also carry an index; its values are read sequentially. Keys cannot contain commas (the schema delimiter).
+
+The encoder detects shared key sets automatically. The first object with a given key set embeds the schema inline; subsequent objects with the same keys store only values plus a pointer to that schema.
+
+```json
+[{"z":1,"a":2,"m":3},{"z":4,"a":5,"m":6}]
 ```
 
-A schema map stores only values in its content body. The schema node appears as the rightmost item inside the map (with the index, if present, farther to the left). The parser identifies it by tag:
+```
+[{+c+a+8m,a,z.5}{+6+4+2^8}]
+```
 
-- **Pointer schema** (`^`) — points to another map or list whose keys become this map's keys
-- **Ref schema** (`'`) — names an external dictionary entry containing the key list
+- Left object embeds schema `m,a,z.5` (keys reversed) followed by its values.
+- Right object stores only values plus `^8`, a pointer to the schema in the left object.
 
-The encoder detects shared key sets **automatically**. The first map with a given key set is encoded normally; subsequent maps with the same keys store only their values and a pointer back to the first map's key layout.
+Key lookup in a schema object is O(n) — scan the schema for the key's position, then walk N values to reach the corresponding value.
 
-Lookup cost for schema maps depends on the schema source:
+### Bytes `@`
 
-- If the schema points to an **indexed object**, key lookup in the schema is **O(log n)**.
-  Combined with indexed value access in the schema map (**O(1)**), total lookup remains **O(log n)**.
-- If the schema points to a **list of keys**, key lookup is **O(n)** (key order is not assumed sorted).
-  Combined with indexed value access in the schema map (**O(1)**), total lookup is **O(n)**.
+A binary data value. The body is URL-safe b64 chars (no padding); the varint is the body's length in chars (same convention as a string's byte length).
+
+Decoders b64-decode the body to recover the original bytes. The b64 alphabet is the same one RX uses for varints — `0-9 a-z A-Z - _` — so the body is parser-safe: the parser hits `@` before scanning into the body, identical to how strings work.
+
+Decoded byte count derives from the body length L:
+
+| L mod 4 | Decoded bytes        |
+|---------|----------------------|
+| 0       | L × 3 / 4            |
+| 2       | (3L − 2) / 4         |
+| 3       | (3L − 1) / 4         |
+| 1       | invalid (no padding) |
+
+| Decoded    | Body chars | Total RX                |
+|------------|-----------:|-------------------------|
+| `[]` (0B)  |          0 | `@` (1 byte)            |
+| 1 byte     |          2 | `[b64×2]@2` (4 bytes)   |
+| 16B (UUID) |         22 | `[b64×22]@m` (24 bytes) |
+| 32B (hash) |         43 | `[b64×43]@H` (45 bytes) |
+
+Use the bytes tag for hashes, UUIDs, signatures, encrypted payloads, image thumbnails, and other binary blobs that would otherwise be wrapped in a hex or base64 string. Tooling can render bytes nodes distinctly from strings (hex view, hex-dump, raw bytes), and applications receive a typed bytes value (`Uint8Array`, `bytes`, `[]u8`, etc.) rather than a string they have to decode.
 
 ### External refs
 
-Encoders and decoders can share an **external dictionary** of values. When a value matches a ref entry by structural equality, the encoder writes `'name` instead of embedding that value. The decoder looks up the name in the same dictionary to reconstruct the original value.
+Encoders and decoders can share a dictionary of values. When a value matches a dictionary entry by structural equality, the encoder writes `'name` instead of embedding it; the decoder reconstructs from the same dictionary.
 
-Pointers already deduplicate repeated embedded values within a document. Refs are primarily for opaque external values that are not directly serializable in RX/JSON, while still allowing agreed dictionary-backed reconstruction. They are also useful for values shared across multiple documents when both sides use the same external dictionary.
+Pointers already dedup within a document. Refs are for:
 
----
-
-## Encoding example walkthrough
-
-Given this JSON:
-
-```json
-{"users":["alice","bob"],"version":3}
-```
-
-The RX encoding is:
-
-```rx
-+6version,7bob,3alice,5;cusers,5:w
-```
-
-Reading **right-to-left**:
-
-| Step | Bytes       | B64      | Tag        | Decoded                      |
-|------|-------------|----------|------------|------------------------------|
-| 1    | `:w`        | `w` = 32 | `:` map    | content is 32 bytes wide     |
-| 2    | `users,5`   | `5` = 5  | `,` string | "users" — key₁               |
-| 3    | `;c`        | `c` = 12 | `;` list   | content is 12 bytes — value₁ |
-| 4    | `alice,5`   | `5` = 5  | `,` string | "alice" — list element₁      |
-| 5    | `bob,3`     | `3` = 3  | `,` string | "bob" — list element₂        |
-| 6    | `version,7` | `7` = 7  | `,` string | "version" — key₂             |
-| 7    | `+6`        | `6` = 6  | `+` number | 6 → zigzag **3** — value₂    |
+- Opaque values that aren't directly serializable
+- Values shared across multiple documents
 
 ---
 
-## Versioning
+## Append-only revisions
 
-This document describes the current encoding used by `@creationix/rx`. The format originated as the internal bytecode for *rex* (a DSL for HTTP routing). Pointers, chains, and indexing are first-class concepts because the design prioritizes small encoded size and random access.
+Publishing a new revision:
 
-Future versions may add new tags or encoding features. The **tag character set** and **right-to-left reading direction** are stable.
+1. Start with the existing bytes.
+2. Append new bytes to the right.
+3. The new root is whatever value the new rightmost bytes form.
+
+Appended content can point back to old content for free — backward deltas naturally span revisions because old bytes stay at their original offsets. Readers who want an older revision truncate at that byte offset; earlier bytes are still a valid RX document for that revision.
+
+---
+
+## Relationship to REXC
+
+RX defines these eleven tags for data:
+
+```
++ * , . ' ^ # @ ] } >
+```
+
+plus three opener markers (`[ { <`) that close container scans.
+
+REXC extends RX with bytecode tags for computation (variables, opcodes, calls, control flow) in a disjoint character set (`$ % ( ) ? & | : = …`) — these never appear in pure RX. Both formats share parse rules, so every RX document parses identically as a REXC document with no bytecode features.
