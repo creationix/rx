@@ -19,67 +19,75 @@
 //   const text  = stringify(myData);     // string
 //
 // For decoding / random-access reading, see rx-read.ts.
-// For the binary variant (smaller output), see rxb.ts / rxb-read.ts.
 // For the format specification, see docs/rx-format.md.
 //
 ///////////////////////////////////////////////////////////////////
 
-// TUNE AS NEEDED CONSTANTS
-// Container body byte threshold for emitting an index. With paired delimiters,
-// R-to-L skipping is byte-proportional, so the cost we care about is total
-// body bytes rather than entry count.
-export let INDEX_THRESHOLD = 64;
-export let STRING_CHAIN_THRESHOLD = 24; // Strings longer than this are eligible for splitting into chains
-export let STRING_CHAIN_DELIMITER = "/."; // Delimiter chars for splitting long strings into chains
-export let DEDUP_COMPLEXITY_LIMIT = 32; // Max recursive node count for structural dedup via JSON.stringify
-
-// Tag byte constants (ASCII codes of the tag characters)
-export const TAG_COMMA = 44;    // ','  string
-export const TAG_DOT = 46;      // '.'  schema (was: chain)
-export const TAG_HASH = 35;     // '#'  index
-export const TAG_CARET = 94;    // '^'  pointer
-export const TAG_PLUS = 43;     // '+'  integer
-export const TAG_STAR = 42;     // '*'  decimal exponent
-export const TAG_AT = 64;       // '@'  bytes
-export const TAG_QUOTE = 39;    // "'"  ref
-// Container delimiter tags (paired). Closer is the canonical tag; opener is a marker.
-export const TAG_LBRACK = 91;   // '['  array opener marker
-export const TAG_RBRACK = 93;   // ']'  array closer
-export const TAG_LBRACE = 123;  // '{'  object opener marker
-export const TAG_RBRACE = 125;  // '}'  object closer
-export const TAG_LANGLE = 60;   // '<'  chain opener marker
-export const TAG_RANGLE = 62;   // '>'  chain closer
-
-// Legacy length-prefixed container tags from the pre-paired-delimiter spec.
-// Kept exported so rx-read.ts (which still parses the old format) compiles
-// until the reader is updated to the new spec.
-export const TAG_COLON = 58;    // ':'  legacy: object
-export const TAG_SEMI = 59;     // ';'  legacy: array
-
-export function tune(options: Partial<{
+// ── Tunable defaults ──
+// Same option set is accepted by `tune()` (sets the module-wide defaults) and
+// by `encode()` / `stringify()` (per-call overrides). Per-call options take
+// precedence over tuned defaults; if neither is set, the values below are used.
+export interface TuneOptions {
+  /** Container body byte threshold for emitting an index. R-to-L skipping is
+   *  byte-proportional, so the cost we care about is total body bytes. */
   indexThreshold?: number;
+  /** Containers shallower than this depth always carry an index (overrides
+   *  the byte heuristic). Root is depth 0. */
+  minIndexDepth?: number;
+  /** Containers at this depth or deeper never carry an index. */
+  maxIndexDepth?: number;
+  /** Strings longer than this are eligible for splitting into chains. */
   stringChainThreshold?: number;
+  /** Delimiter characters used for splitting long strings into chains. Empty
+   *  string disables chain splitting. */
   stringChainDelimiter?: string;
+  /** Max recursive node count for structural dedup via JSON.stringify. 0 = disable. */
   dedupComplexityLimit?: number;
-}>): void {
-  if (options.indexThreshold !== undefined) INDEX_THRESHOLD = options.indexThreshold;
-  if (options.stringChainThreshold !== undefined) STRING_CHAIN_THRESHOLD = options.stringChainThreshold;
-  if (options.stringChainDelimiter !== undefined) STRING_CHAIN_DELIMITER = options.stringChainDelimiter;
-  if (options.dedupComplexityLimit !== undefined) DEDUP_COMPLEXITY_LIMIT = options.dedupComplexityLimit;
 }
+
+// Module-wide active values. Mutated by `tune()`, read in `encode()` as the
+// fallback when a per-call option is undefined.
+const tuned: Required<TuneOptions> = {
+  indexThreshold: 64,
+  minIndexDepth: 0,
+  maxIndexDepth: Infinity,
+  stringChainThreshold: 24,
+  stringChainDelimiter: "/.",
+  dedupComplexityLimit: 32,
+};
+
+/** Override the module-wide encoding defaults. Per-call `EncodeOptions` always
+ *  win over tuned values; tuned values win over the built-in defaults.
+ *  Returns the new active defaults. */
+export function tune(options: TuneOptions): Required<TuneOptions> {
+  for (const k of Object.keys(options) as (keyof TuneOptions)[]) {
+    const v = options[k];
+    if (v !== undefined) (tuned as Record<string, unknown>)[k] = v;
+  }
+  return { ...tuned };
+}
+
+// Tag byte constants (internal — ASCII codes of the tag characters)
+const TAG_COMMA = 44;    // ','
+const TAG_DOT = 46;      // '.'
+const TAG_HASH = 35;     // '#'
+const TAG_CARET = 94;    // '^'
+const TAG_PLUS = 43;     // '+'
+const TAG_STAR = 42;     // '*'
 
 // ── Base64 numeric system ──
 // Numbers are written big-endian with the most significant digit on the left
 // There is no padding, not even for zero, which is an empty string
 
-export const b64chars =
+const b64chars =
   "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
 
 // char-code -> digit-value (0xff = invalid)
+/** @internal — exported for use by rx-read.ts only */
 export const b64decodeTable = new Uint8Array(256).fill(0xff);
 
 // digit-value -> char-code
-export const b64encodeTable = new Uint8Array(64);
+const b64encodeTable = new Uint8Array(64);
 
 for (let i = 0; i < 64; i++) {
   const code = b64chars.charCodeAt(i);
@@ -88,79 +96,13 @@ for (let i = 0; i < 64; i++) {
 }
 
 // Return true if byte is 0-9, a-z, A-Z, '-' or '_'
+/** @internal — exported for use by rx-read.ts only */
 export function isB64(byte: number): boolean {
   return b64decodeTable[byte] !== 0xff;
 }
 
-// Encode a number as b64 string
-export function b64Stringify(num: number): string {
-  if (!Number.isSafeInteger(num) || num < 0) {
-    throw new Error(`Cannot stringify ${num} as base64`);
-  }
-  let result = "";
-  while (num > 0) {
-    result = b64chars[num % 64] + result;
-    num = Math.floor(num / 64);
-  }
-  return result;
-}
-
-// Decode a b64 string to a number
-export function b64Parse(str: string): number {
-  let result = 0;
-  for (let i = 0; i < str.length; i++) {
-    const digit = b64decodeTable[str.charCodeAt(i)]!;
-    if (digit === 0xff) {
-      throw new Error(`Invalid base64 character: ${str[i]}`);
-    }
-    result = result * 64 + digit;
-  }
-  return result;
-}
-
-// Read a b64 number from a byte range
-export function b64Read(
-  data: Uint8Array,
-  left: number,
-  right: number,
-): number {
-  let result = 0;
-  for (let i = left; i < right; i++) {
-    const digit = b64decodeTable[data[i]!]!
-    if (digit === 0xff) {
-      throw new Error(`Invalid base64 character code: ${data[i]}`);
-    }
-    result = result * 64 + digit;
-  }
-  return result;
-}
-
-// Return the number of b64 digits needed to encode num
-export function b64Sizeof(num: number): number {
-  if (!Number.isSafeInteger(num) || num < 0) {
-    throw new Error(`Cannot calculate size of ${num} as base64`);
-  }
-  return Math.ceil(Math.log(num + 1) / Math.log(64));
-}
-
-export function b64Write(
-  data: Uint8Array,
-  left: number,
-  right: number,
-  num: number,
-) {
-  let offset = right - 1;
-  while (offset >= left) {
-    data[offset--] = b64encodeTable[num % 64]!;
-    num = Math.floor(num / 64);
-  }
-  if (num > 0) {
-    throw new Error(`Cannot write ${num} as base64`);
-  }
-}
-
 // Encode a signed integer as an unsigned zigzag value
-export function toZigZag(num: number): number {
+function toZigZag(num: number): number {
   if (num >= -0x80000000 && num <= 0x7fffffff) {
     return ((num << 1) ^ (num >> 31)) >>> 0;
   }
@@ -168,6 +110,7 @@ export function toZigZag(num: number): number {
 }
 
 // Decode an unsigned zigzag value back to a signed integer
+/** @internal — exported for use by rx-read.ts only */
 export function fromZigZag(num: number): number {
   if (num <= 0xffffffff) {
     return (num >>> 1) ^ -(num & 1);
@@ -182,34 +125,13 @@ const textDecoder = new TextDecoder();
 
 export type Refs = Record<string, unknown>;
 
-export interface EncodeOptions {
-  /** Stream chunks instead of returning a buffer */
+export interface EncodeOptions extends TuneOptions {
+  /** Stream chunks instead of returning a buffer. */
   onChunk?: (chunk: Uint8Array, offset: number) => void;
-  /** External dictionary of known values (UPPERCASE KEYS) */
+  /** External dictionary of known values (UPPERCASE KEYS). */
   refs?: Refs;
-  /** Override INDEX_THRESHOLD for this encode call. 0 = always index, Infinity = never index. */
-  indexThreshold?: number;
-  /** Override STRING_CHAIN_THRESHOLD. 0 = always split on delimiter, Infinity = never split. */
-  stringChainThreshold?: number;
-  /** Override STRING_CHAIN_DELIMITER. Empty string disables chain splitting. */
-  stringChainDelimiter?: string;
-  /** Override DEDUP_COMPLEXITY_LIMIT. Objects/arrays with recursive node count below this are structurally deduped. 0 = disable. */
-  dedupComplexityLimit?: number;
   /** Buffer chunk size in bytes. Chunks are flushed when full. Default 65536. */
   chunkSize?: number;
-  /**
-   * Containers shallower than this depth always carry an index (overrides the
-   * byte heuristic). Root is depth 0. Default 0 (no force-on).
-   * Example: `minIndexDepth: 1` indexes the root only; nested containers fall
-   * back to the byte heuristic (or to `maxIndexDepth` if also set).
-   */
-  minIndexDepth?: number;
-  /**
-   * Containers at this depth or deeper never carry an index. Default Infinity
-   * (no force-off). Combine with `minIndexDepth` to force "only root" by
-   * setting both to 1.
-   */
-  maxIndexDepth?: number;
 }
 
 export type StringifyOptions = Omit<EncodeOptions, "onChunk"> & {
@@ -230,7 +152,7 @@ function trimZeroes(str: string): [number, number] {
   return [parseInt(trimmed, 10), str.length - end];
 }
 
-export function splitNumber(val: number): [number, number] {
+function splitNumber(val: number): [number, number] {
   if (Number.isInteger(val)) {
     if (Math.abs(val) < 10) return [val, 0];
     if (Math.abs(val) < 9.999999999999999e20) return trimZeroes(val.toString());
@@ -263,7 +185,7 @@ function entryValue(e: [string, unknown]): unknown {
 }
 
 // Compare two strings in UTF-8 byte order (code point order preserves UTF-8 ordering)
-export function utf8Sort(a: string, b: string): number {
+function utf8Sort(a: string, b: string): number {
   const len = Math.min(a.length, b.length);
   for (let i = 0; i < len;) {
     const cpA = a.codePointAt(i) ?? 0;
@@ -279,7 +201,7 @@ export function utf8Sort(a: string, b: string): number {
 // Generates a stable cache key for ref lookups.
 // Primitives get a type-tagged string. Objects use JSON.stringify (cached).
 const KeyMap = new WeakMap<object, string>();
-export function makeKey(rootVal: unknown): unknown {
+function makeKey(rootVal: unknown): unknown {
   if (rootVal === null || rootVal === undefined) return String(rootVal);
   switch (typeof rootVal) {
     case "string": return '"' + rootVal;
@@ -322,11 +244,11 @@ export function encode(
 export function encode(value: unknown, options?: EncodeOptions): Uint8Array;
 export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array | undefined {
   const opts = { ...ENCODE_DEFAULTS, ...options };
-  const indexThreshold = opts.indexThreshold ?? INDEX_THRESHOLD;
-  const chainThreshold = opts.stringChainThreshold ?? STRING_CHAIN_THRESHOLD;
-  const chainDelimiter = opts.stringChainDelimiter ?? STRING_CHAIN_DELIMITER;
-  const minIndexDepth = opts.minIndexDepth ?? 0;
-  const maxIndexDepth = opts.maxIndexDepth ?? Infinity;
+  const indexThreshold = opts.indexThreshold ?? tuned.indexThreshold;
+  const chainThreshold = opts.stringChainThreshold ?? tuned.stringChainThreshold;
+  const chainDelimiter = opts.stringChainDelimiter ?? tuned.stringChainDelimiter;
+  const minIndexDepth = opts.minIndexDepth ?? tuned.minIndexDepth;
+  const maxIndexDepth = opts.maxIndexDepth ?? tuned.maxIndexDepth;
   // Container depth: root container is depth 0, its container children are 1, etc.
   let depth = 0;
   // Resolve index decision for a container at depth `d` with body size `bodySize`.
@@ -485,7 +407,7 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   // Pre-scan: mark objects/arrays with complexity below COMPLEXITY_LIMIT as
   // eligible for structural dedup via JSON.stringify. Only simple values are
   // stored in the set — complex values are skipped during encoding.
-  const complexityLimit = opts.dedupComplexityLimit ?? DEDUP_COMPLEXITY_LIMIT;
+  const complexityLimit = opts.dedupComplexityLimit ?? tuned.dedupComplexityLimit;
   const simpleValues = new WeakSet<object>();
 
   (function prescan(val: unknown): number {

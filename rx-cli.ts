@@ -1,14 +1,11 @@
+import { stringify, tune } from "./rx.ts";
+
+// Snapshot the active defaults for help text. `tune({})` is a no-op call that
+// returns the current values (no per-call constants are exported).
+const DEFAULTS = tune({});
 import {
-	stringify, encode,
-	tune,
-	INDEX_THRESHOLD, STRING_CHAIN_THRESHOLD, STRING_CHAIN_DELIMITER, DEDUP_COMPLEXITY_LIMIT,
-} from "./rx.ts";
-import {
-	open, inspect,
-	makeCursor, read,
+	decode,
 } from "./rx-read.ts";
-import { encode as rxbEncode } from "./rxb.ts";
-import { open as rxbOpen } from "./rxb-read.ts";
 import { readdirSync } from "node:fs";
 import { readFile, writeFile, mkdir, unlink, lstat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -49,30 +46,24 @@ function applyTheme(color: boolean) {
 
 // ── Formats & detection ──────────────────────────────────────────────────────
 
-type Format = "json" | "rx" | "rxb";
+type Format = "json" | "rx";
 type OutputFormat = Format | "tree";
 
-const VALID_FORMATS: readonly OutputFormat[] = ["json", "rx", "rxb", "tree"] as const;
+const VALID_FORMATS: readonly OutputFormat[] = ["json", "rx", "tree"] as const;
 
 function formatFromExt(path: string): Format | undefined {
 	if (path.endsWith(".json")) return "json";
 	if (path.endsWith(".rx")) return "rx";
-	if (path.endsWith(".rxb")) return "rxb";
 	return undefined;
 }
 
 // Content-based format detection for stdin / unknown extensions.
 function detectFormat(bytes: Uint8Array): Format {
 	if (bytes.length === 0) return "rx";
-	// rxb starts with a tag byte < 0x20 (control range) that JSON/rx never produce as first byte.
-	const first = bytes[0]!;
-	if (first < 0x20 && first !== 0x09 && first !== 0x0a && first !== 0x0d) return "rxb";
-	// Try parsing as rx; if it consumes all bytes, it's rx.
+	// Try parsing as rx; if it succeeds, it's rx.
 	try {
-		const trimmed = trimWhitespace(bytes);
-		const c = makeCursor(trimmed);
-		read(c);
-		if (c.left === 0) return "rx";
+		decode(trimWhitespace(bytes));
+		return "rx";
 	} catch { /* not rx */ }
 	return "json";
 }
@@ -117,14 +108,12 @@ type ParsedInput = {
 	value: unknown;
 	inputFormat: Format;
 	rxBytes?: Uint8Array;   // present when input was rx
-	rxbBytes?: Uint8Array;  // present when input was rxb
 };
 
 function parseBytes(bytes: Uint8Array, format: Format): ParsedInput {
-	if (format === "rxb") return { value: rxbOpen(bytes), inputFormat: "rxb", rxbBytes: bytes };
 	if (format === "rx") {
 		const trimmed = trimWhitespace(bytes);
-		return { value: open(trimmed), inputFormat: "rx", rxBytes: trimmed };
+		return { value: decode(trimmed), inputFormat: "rx", rxBytes: trimmed };
 	}
 	const text = new TextDecoder().decode(bytes);
 	return { value: JSON.parse(stripJsonComments(text)), inputFormat: "json" };
@@ -297,7 +286,6 @@ function normalizeForJson(value: unknown, inArray: boolean): unknown {
 
 // Render `value` in the requested format, returning bytes to write.
 function render(value: unknown, format: OutputFormat, color: boolean, width: number): Uint8Array {
-	if (format === "rxb") return rxbEncode(value);
 	if (format === "rx") return new TextEncoder().encode(stringify(value) + "\n");
 	if (format === "json") {
 		const text = JSON.stringify(normalizeForJson(value, false), null, 2) ?? "null";
@@ -394,8 +382,8 @@ function parseFormatFlag(v: string | undefined, flag: string, subcmd: string): O
 
 function parseInputFormatFlag(v: string | undefined, flag: string, subcmd: string): Format {
 	if (!v) fail(subcmd, `${flag} requires a value`, `example: ${flag} json`);
-	if (v !== "json" && v !== "rx" && v !== "rxb") {
-		fail(subcmd, `${flag} value '${v}' not recognized`, `expected one of: json | rx | rxb`);
+	if (v !== "json" && v !== "rx") {
+		fail(subcmd, `${flag} value '${v}' not recognized`, `expected one of: json | rx`);
 	}
 	return v;
 }
@@ -421,13 +409,13 @@ ${tH2}USAGE${tR}
   ${tCmd}rx${tR} ${tArg}FILE${tR} [${tArg}SEGMENT${tR}...]              ${tDesc}# shortcut, no subcommand needed${tR}
 
 ${tH2}ARGUMENTS${tR}
-  ${tArg}FILE${tR}                              Path to .json, .rx, or .rxb. Use ${tArg}-${tR} for stdin.
+  ${tArg}FILE${tR}                              Path to .json, .rx. Use ${tArg}-${tR} for stdin.
                                     Format auto-detected by extension then by content.
   ${tArg}SEGMENT${tR}                           One key or numeric index per segment.
                                     No segments = entire file.
 
 ${tH2}OPTIONS${tR}
-  ${tCmd}-f${tR}, ${tCmd}--format${tR} ${tArg}FMT${tR}                  Output format: ${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
+  ${tCmd}-f${tR}, ${tCmd}--format${tR} ${tArg}FMT${tR}                  Output format: ${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR}
   ${tCmd}-w${tR}, ${tCmd}--width${tR} ${tArg}N${tR}                     Target line width for tree output ${tDim}(default: 80)${tR}
   ${tCmd}-c${tR}, ${tCmd}--color${tR}                         Force ANSI color
       ${tCmd}--no-color${tR}                      Disable color
@@ -497,7 +485,7 @@ async function runShow(argv: string[]): Promise<void> {
 	applyTheme(color);
 	const parsed = await readSource(opts.file);
 	const value = opts.segments.length > 0 ? applyPath(parsed.value, opts.segments) : parsed.value;
-	const bytes = render(value, format, color && format !== "rxb", opts.width);
+	const bytes = render(value, format, color, opts.width);
 	if (opts.output) await writeFile(opts.output, bytes);
 	else process.stdout.write(bytes);
 }
@@ -506,7 +494,7 @@ async function runShow(argv: string[]): Promise<void> {
 
 function helpConvert(): string {
 	return `
-${tH1}rx convert${tR} — convert between JSON, rx, and rxb formats.
+${tH1}rx convert${tR} — convert between JSON, rx formats.
 
 ${tH2}USAGE${tR}
   ${tCmd}rx convert${tR} ${tArg}SRC${tR} ${tArg}DST${tR}
@@ -518,17 +506,17 @@ ${tH2}ARGUMENTS${tR}
   ${tArg}SRC${tR}                               Input path, or ${tArg}-${tR} for stdin
   ${tArg}DST${tR}                               Output path, or ${tArg}-${tR} for stdout
 
-  Extension determines format: ${tArg}.json${tR}, ${tArg}.rx${tR}, ${tArg}.rxb${tR}.
+  Extension determines format: ${tArg}.json${tR}, ${tArg}.rx${tR}, ${tArg}.
   When either side is ${tArg}-${tR}, pass ${tCmd}--from${tR} or ${tCmd}--to${tR} to set its format.
   ${tCmd}--from${tR} may be omitted: stdin is content-detected.
 
 ${tH2}OPTIONS${tR}
-  ${tCmd}--from${tR} ${tArg}FMT${tR}                       Input format: ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
-  ${tCmd}--to${tR} ${tArg}FMT${tR}                         Output format: ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR}
-  ${tCmd}--tune-index-threshold${tR} ${tArg}N${tR}         Index objects/arrays with body bytes >= N ${tDim}(default: ${INDEX_THRESHOLD})${tR}
-  ${tCmd}--tune-chain-threshold${tR} ${tArg}N${tR}         Split strings longer than N ${tDim}(default: ${STRING_CHAIN_THRESHOLD})${tR}
-  ${tCmd}--tune-chain-delimiter${tR} ${tArg}S${tR}         Delimiters for chain splitting ${tDim}(default: ${STRING_CHAIN_DELIMITER})${tR}
-  ${tCmd}--tune-dedup-limit${tR} ${tArg}N${tR}             Max node count for structural dedup ${tDim}(default: ${DEDUP_COMPLEXITY_LIMIT})${tR}
+  ${tCmd}--from${tR} ${tArg}FMT${tR}                       Input format: ${tArg}json${tR} | ${tArg}rx${tR}
+  ${tCmd}--to${tR} ${tArg}FMT${tR}                         Output format: ${tArg}json${tR} | ${tArg}rx${tR}
+  ${tCmd}--tune-index-threshold${tR} ${tArg}N${tR}         Index objects/arrays with body bytes >= N ${tDim}(default: ${DEFAULTS.indexThreshold})${tR}
+  ${tCmd}--tune-chain-threshold${tR} ${tArg}N${tR}         Split strings longer than N ${tDim}(default: ${DEFAULTS.stringChainThreshold})${tR}
+  ${tCmd}--tune-chain-delimiter${tR} ${tArg}S${tR}         Delimiters for chain splitting ${tDim}(default: ${DEFAULTS.stringChainDelimiter})${tR}
+  ${tCmd}--tune-dedup-limit${tR} ${tArg}N${tR}             Max node count for structural dedup ${tDim}(default: ${DEFAULTS.dedupComplexityLimit})${tR}
   ${tCmd}--min-index-depth${tR} ${tArg}N${tR}              Containers shallower than depth N always get an index ${tDim}(default: 0)${tR}
   ${tCmd}--max-index-depth${tR} ${tArg}N${tR}              Containers at depth N or deeper never get an index ${tDim}(default: ∞)${tR}
                                        Root is depth 0. Use ${tArg}--min-index-depth 1 --max-index-depth 1${tR} to index only the root.
@@ -536,16 +524,12 @@ ${tH2}OPTIONS${tR}
 
 ${tH2}EXAMPLES${tR}
   ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rx${tR}         ${tDesc}# JSON → rx${tR}
-  ${tCmd}rx convert${tR} ${tArg}data.json${tR} ${tArg}data.rxb${tR}        ${tDesc}# JSON → rxb${tR}
   ${tCmd}rx convert${tR} ${tArg}data.rx${tR}   ${tArg}data.json${tR}       ${tDesc}# rx → JSON${tR}
-  ${tCmd}rx convert${tR} ${tArg}data.rxb${tR}  ${tArg}data.json${tR}       ${tDesc}# rxb → JSON${tR}
-  ${tCmd}rx convert${tR} ${tArg}data.rx${tR}   ${tArg}data.rxb${tR}        ${tDesc}# rx → rxb (re-encode)${tR}
 
   ${tCmd}cat${tR} ${tArg}data.json${tR} | ${tCmd}rx convert${tR} ${tArg}-${tR} ${tArg}data.rx${tR}
   ${tCmd}rx convert${tR} ${tArg}data.rx${tR} ${tArg}-${tR} ${tCmd}--to${tR} ${tArg}json${tR} > ${tArg}data.json${tR}
-  ${tCmd}curl${tR} ${tArg}-s${tR} ${tArg}https://ex/api.json${tR} | ${tCmd}rx convert${tR} ${tArg}-${tR} ${tArg}snap.rxb${tR}
 
-  ${tCmd}rx convert${tR} ${tArg}big.json${tR} ${tArg}big.rxb${tR} ${tCmd}--tune-dedup-limit${tR} ${tArg}128${tR}
+  ${tCmd}rx convert${tR} ${tArg}big.json${tR} ${tArg}big.rx${tR} ${tCmd}--tune-dedup-limit${tR} ${tArg}128${tR}
 `;
 }
 
@@ -600,7 +584,7 @@ async function runConvert(argv: string[]): Promise<void> {
 	if (!inFmt && opts.src !== "-") inFmt = formatFromExt(opts.src);
 	if (!inFmt && opts.src !== "-") {
 		fail("convert", `cannot infer input format from '${opts.src}'`,
-			`pass --from json|rx|rxb or use a .json/.rx/.rxb extension`);
+			`pass --from json|rx or use a .json/.rx extension`);
 	}
 	// (src === "-" and !inFmt): we'll content-detect inside readSource
 
@@ -609,7 +593,7 @@ async function runConvert(argv: string[]): Promise<void> {
 	if (!outFmt && opts.dst !== "-") outFmt = formatFromExt(opts.dst);
 	if (!outFmt) {
 		fail("convert", `cannot infer output format for '${opts.dst}'`,
-			`pass --to json|rx|rxb or use a .json/.rx/.rxb extension`);
+			`pass --to json|rx or use a .json/.rx extension`);
 	}
 
 	tune({
@@ -621,9 +605,7 @@ async function runConvert(argv: string[]): Promise<void> {
 
 	const parsed = await readSource(opts.src, inFmt);
 	let toWrite: Uint8Array;
-	if (outFmt === "rxb") {
-		toWrite = rxbEncode(parsed.value);
-	} else if (outFmt === "rx") {
+	if (outFmt === "rx") {
 		const text = stringify(parsed.value, {
 			minIndexDepth: opts.minIndexDepth,
 			maxIndexDepth: opts.maxIndexDepth,
@@ -717,9 +699,9 @@ async function runInspect(argv: string[]): Promise<void> {
 	const useColor = resolveColor(color, isTTY);
 	applyTheme(useColor);
 	const parsed = await readSource(file);
-	const rxBytes = parsed.rxBytes ?? encode(parsed.value);
-	const ast = inspect(rxBytes);
-	const text = JSON.stringify(ast, null, 2);
+	// AST inspector removed with the cursor-based reader rewrite. Fall back to
+	// rendering the decoded value as JSON.
+	const text = JSON.stringify(parsed.value, null, 2);
 	const out = new TextEncoder().encode((useColor ? highlightJSON(text) : text) + "\n");
 	if (output) await writeFile(output, out);
 	else process.stdout.write(out);
@@ -754,14 +736,12 @@ async function runStats(argv: string[]): Promise<void> {
 	const parsed = await readSource(file);
 	const jsonBytes = new TextEncoder().encode(JSON.stringify(parsed.value)).length;
 	const rxBytes = parsed.rxBytes ? parsed.rxBytes.length : new TextEncoder().encode(stringify(parsed.value)).length;
-	const rxbBytes = parsed.rxbBytes ? parsed.rxbBytes.length : rxbEncode(parsed.value).length;
 	const source = parsed.inputFormat;
 	const pct = (n: number, base: number) => base === 0 ? "—" : `${((1 - n / base) * 100).toFixed(1)}% smaller`;
 	process.stdout.write(
 		`source format:  ${source}\n` +
 		`json:           ${jsonBytes.toLocaleString()} bytes\n` +
-		`rx text:        ${rxBytes.toLocaleString()} bytes  (${pct(rxBytes, jsonBytes)} than json)\n` +
-		`rxb binary:     ${rxbBytes.toLocaleString()} bytes  (${pct(rxbBytes, jsonBytes)} than json, ${pct(rxbBytes, rxBytes)} than rx)\n`,
+		`rx text:        ${rxBytes.toLocaleString()} bytes  (${pct(rxBytes, jsonBytes)} than json)\n`,
 	);
 }
 
@@ -769,13 +749,12 @@ async function runStats(argv: string[]): Promise<void> {
 
 function helpDemo(): string {
 	return `
-${tH1}rx demo${tR} — show an example value in all three formats side by side.
+${tH1}rx demo${tR} — show an example value in JSON, rx text, and tree form.
 
 ${tH2}USAGE${tR}
   ${tCmd}rx demo${tR}
 
-Prints a built-in sample value in JSON, rx text, and rxb binary form.
-Useful for learning what the formats look like.
+Prints a built-in sample value to demonstrate what the formats look like.
 `;
 }
 
@@ -796,24 +775,12 @@ async function runDemo(argv: string[]): Promise<void> {
 		flags: { cache: true, compress: true },
 	};
 	const rxText = stringify(sample);
-	const rxbBytes = rxbEncode(sample);
 	const jsonText = JSON.stringify(sample, null, 2);
 	const tree = treeStringify(sample, 80);
 	const w = (title: string, body: string) => `${tH2}${title}${tR}\n${body}\n\n`;
 	process.stdout.write("\n" + w("Tree view", color ? tree.split("\n").map(highlightTree).join("\n") : tree));
 	process.stdout.write(w("JSON", color ? highlightJSON(jsonText) : jsonText));
 	process.stdout.write(w(`rx text (${new TextEncoder().encode(rxText).length} bytes)`, rxText));
-	process.stdout.write(w(`rxb binary (${rxbBytes.length} bytes, shown as hex)`, hex(rxbBytes)));
-}
-
-function hex(bytes: Uint8Array): string {
-	let out = "";
-	for (let i = 0; i < bytes.length; i += 16) {
-		const row: string[] = [];
-		for (let j = 0; j < 16 && i + j < bytes.length; j++) row.push(bytes[i + j]!.toString(16).padStart(2, "0"));
-		out += row.join(" ") + "\n";
-	}
-	return out;
 }
 
 // ── Subcommand: completions ──────────────────────────────────────────────────
@@ -938,11 +905,11 @@ async function handleCompleteRequest(words: string[]): Promise<void> {
 		return;
 	}
 	if (prev === "-f" || prev === "--format") {
-		process.stdout.write(["tree", "json", "rx", "rxb"].filter(s => s.startsWith(current)).join("\n") + "\n");
+		process.stdout.write(["tree", "json", "rx"].filter(s => s.startsWith(current)).join("\n") + "\n");
 		return;
 	}
 	if (prev === "--from" || prev === "--to") {
-		process.stdout.write(["json", "rx", "rxb"].filter(s => s.startsWith(current)).join("\n") + "\n");
+		process.stdout.write(["json", "rx"].filter(s => s.startsWith(current)).join("\n") + "\n");
 		return;
 	}
 	// File completion with data-extension priority
@@ -960,7 +927,7 @@ const FLAGS_BY_SUB: Record<string, string[]> = {
 	help: ["--all"],
 };
 
-const DATA_EXTENSIONS = [".json", ".rx", ".rxb"];
+const DATA_EXTENSIONS = [".json", ".rx"];
 
 function looksLikePath(s: string): boolean {
 	if (s === "." || s === ".." || s === "~") return true;
@@ -1006,20 +973,20 @@ ${tH2}USAGE${tR}
 
 ${tH2}COMMANDS${tR}
   ${tCmd}show${tR}      Pretty-print a file or a value at a path
-  ${tCmd}convert${tR}   Convert between JSON, rx, and rxb
+  ${tCmd}convert${tR}   Convert between JSON, rx
   ${tCmd}help${tR}      Show help for a command (${tCmd}rx help${tR} ${tArg}COMMAND${tR})
 
 ${tH2}FORMATS${tR}
   ${tArg}.json${tR}  JSON text
   ${tArg}.rx${tR}    rx text format (compact, human-readable)
-  ${tArg}.rxb${tR}   rx binary format (smallest)
+  ${tArg}   rx binary format (smallest)
 
 ${tH2}GLOBAL OPTIONS${tR}
   ${tCmd}-h${tR}, ${tCmd}--help${tR}                          Show this help
   ${tCmd}-v${tR}, ${tCmd}--version${tR}                       Print version (${VERSION})
 
 ${tH2}ENVIRONMENT${tR}
-  ${tArg}RX_FORMAT${tR}                         Pin default output format (${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR} | ${tArg}rxb${tR})
+  ${tArg}RX_FORMAT${tR}                         Pin default output format (${tArg}tree${tR} | ${tArg}json${tR} | ${tArg}rx${tR})
   ${tArg}NO_COLOR${tR}                          Disable ANSI color when set
 
 ${tH2}EXAMPLES${tR}

@@ -19,6 +19,7 @@
 import { isB64, fromZigZag, b64decodeTable } from "./rx.ts";
 
 const td = new TextDecoder();
+const te = new TextEncoder();
 
 // ── Tag bytes ──────────────────────────────────────────────────
 const T_PLUS = 43;     // +
@@ -127,12 +128,12 @@ function decodeBytesBody(data: Uint8Array, bodyStart: number, bodyEnd: number): 
 
 // ── Decode ─────────────────────────────────────────────────────
 
-export interface DecodeResult {
+interface DecodeResult {
   value: unknown;
   leftEdge: number;
 }
 
-export function decodeNode(data: Uint8Array, right: number): DecodeResult {
+function decodeNode(data: Uint8Array, right: number): DecodeResult {
   const { tag, tagPos } = findTag(data, right);
   const vStart = tagPos + 1;
 
@@ -436,15 +437,14 @@ function decodeChain(data: Uint8Array, closerPos: number): DecodeResult {
       let anyBytes = false;
       for (const p of parts) if (p instanceof Uint8Array) { anyBytes = true; break; }
       if (anyBytes) {
-        const enc = new TextEncoder();
         let total = 0;
         for (const p of parts) {
-          total += p instanceof Uint8Array ? p.length : enc.encode(p as string).length;
+          total += p instanceof Uint8Array ? p.length : te.encode(p as string).length;
         }
         const out = new Uint8Array(total);
         let oi = 0;
         for (const p of parts) {
-          const b = p instanceof Uint8Array ? p : enc.encode(p as string);
+          const b = p instanceof Uint8Array ? p : te.encode(p as string);
           out.set(b, oi);
           oi += b.length;
         }
@@ -466,7 +466,5 @@ export function decode(data: Uint8Array): unknown {
 }
 
 export function parse(text: string): unknown {
-  return decode(new TextEncoder().encode(text));
+  return decode(te.encode(text));
 }
-
-export const open = decode;

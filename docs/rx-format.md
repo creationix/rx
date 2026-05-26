@@ -306,7 +306,7 @@ Appended content can point back to old content for free — backward deltas natu
 
 ---
 
-## Relationship to REXC
+## Relationship to Rex Bytecode
 
 RX defines these eleven tags for data:
 
@@ -316,4 +316,4 @@ RX defines these eleven tags for data:
 
 plus three opener markers (`[ { <`) that close container scans.
 
-REXC extends RX with bytecode tags for computation (variables, opcodes, calls, control flow) in a disjoint character set (`$ % ( ) ? & | : = …`) — these never appear in pure RX. Both formats share parse rules, so every RX document parses identically as a REXC document with no bytecode features.
+REXT extends RX with bytecode tags for computation (variables, opcodes, calls, control flow) in a disjoint character set (`$ % ( ) ? & | : = …`) — these never appear in pure RX. Both formats share parse rules, so every RX document parses identically as a REXT document with no bytecode features.
