@@ -224,15 +224,6 @@ export function splitNumber(val: number): [number, number] {
   throw new Error(`Invalid number format: ${val}`);
 }
 
-// Compare entry pairs by key in UTF-8 byte order — avoids closure allocation in sort()
-function utf8SortEntries(a: [string, unknown], b: [string, unknown]): number {
-  return utf8Sort(a[0], b[0]);
-}
-
-function entryValue(e: [string, unknown]): unknown {
-  return e[1];
-}
-
 // Compare two strings in UTF-8 byte order (code point order preserves UTF-8 ordering)
 export function utf8Sort(a: string, b: string): number {
   const len = Math.min(a.length, b.length);
