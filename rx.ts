@@ -19,51 +19,75 @@
 //   const text  = stringify(myData);     // string
 //
 // For decoding / random-access reading, see rx-read.ts.
-// For the binary variant (smaller output), see rxb.ts / rxb-read.ts.
 // For the format specification, see docs/rx-format.md.
 //
 ///////////////////////////////////////////////////////////////////
 
-// TUNE AS NEEDED CONSTANTS
-export let INDEX_THRESHOLD = 16; // Objects and Arrays with more values than this are indexed
-export let STRING_CHAIN_THRESHOLD = 24; // Strings longer than this are eligible for splitting into chains
-export let STRING_CHAIN_DELIMITER = "/."; // Delimiter chars for splitting long strings into chains
-export let DEDUP_COMPLEXITY_LIMIT = 32; // Max recursive node count for structural dedup via JSON.stringify
-
-// Tag byte constants (ASCII codes of the tag characters)
-export const TAG_COMMA = 44;    // ','
-export const TAG_DOT = 46;      // '.'
-export const TAG_COLON = 58;    // ':'
-export const TAG_SEMI = 59;     // ';'
-export const TAG_HASH = 35;     // '#'
-export const TAG_CARET = 94;    // '^'
-export const TAG_PLUS = 43;     // '+'
-export const TAG_STAR = 42;     // '*'
-
-export function tune(options: Partial<{
+// ── Tunable defaults ──
+// Same option set is accepted by `tune()` (sets the module-wide defaults) and
+// by `encode()` / `stringify()` (per-call overrides). Per-call options take
+// precedence over tuned defaults; if neither is set, the values below are used.
+export interface TuneOptions {
+  /** Container body byte threshold for emitting an index. R-to-L skipping is
+   *  byte-proportional, so the cost we care about is total body bytes. */
   indexThreshold?: number;
+  /** Containers shallower than this depth always carry an index (overrides
+   *  the byte heuristic). Root is depth 0. */
+  minIndexDepth?: number;
+  /** Containers at this depth or deeper never carry an index. */
+  maxIndexDepth?: number;
+  /** Strings longer than this are eligible for splitting into chains. */
   stringChainThreshold?: number;
+  /** Delimiter characters used for splitting long strings into chains. Empty
+   *  string disables chain splitting. */
   stringChainDelimiter?: string;
+  /** Max recursive node count for structural dedup via JSON.stringify. 0 = disable. */
   dedupComplexityLimit?: number;
-}>): void {
-  if (options.indexThreshold !== undefined) INDEX_THRESHOLD = options.indexThreshold;
-  if (options.stringChainThreshold !== undefined) STRING_CHAIN_THRESHOLD = options.stringChainThreshold;
-  if (options.stringChainDelimiter !== undefined) STRING_CHAIN_DELIMITER = options.stringChainDelimiter;
-  if (options.dedupComplexityLimit !== undefined) DEDUP_COMPLEXITY_LIMIT = options.dedupComplexityLimit;
 }
+
+// Module-wide active values. Mutated by `tune()`, read in `encode()` as the
+// fallback when a per-call option is undefined.
+const tuned: Required<TuneOptions> = {
+  indexThreshold: 64,
+  minIndexDepth: 0,
+  maxIndexDepth: Infinity,
+  stringChainThreshold: 24,
+  stringChainDelimiter: "/.",
+  dedupComplexityLimit: 32,
+};
+
+/** Override the module-wide encoding defaults. Per-call `EncodeOptions` always
+ *  win over tuned values; tuned values win over the built-in defaults.
+ *  Returns the new active defaults. */
+export function tune(options: TuneOptions): Required<TuneOptions> {
+  for (const k of Object.keys(options) as (keyof TuneOptions)[]) {
+    const v = options[k];
+    if (v !== undefined) (tuned as Record<string, unknown>)[k] = v;
+  }
+  return { ...tuned };
+}
+
+// Tag byte constants (internal — ASCII codes of the tag characters)
+const TAG_COMMA = 44;    // ','
+const TAG_DOT = 46;      // '.'
+const TAG_HASH = 35;     // '#'
+const TAG_CARET = 94;    // '^'
+const TAG_PLUS = 43;     // '+'
+const TAG_STAR = 42;     // '*'
 
 // ── Base64 numeric system ──
 // Numbers are written big-endian with the most significant digit on the left
 // There is no padding, not even for zero, which is an empty string
 
-export const b64chars =
+const b64chars =
   "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
 
 // char-code -> digit-value (0xff = invalid)
+/** @internal — exported for use by rx-read.ts only */
 export const b64decodeTable = new Uint8Array(256).fill(0xff);
 
 // digit-value -> char-code
-export const b64encodeTable = new Uint8Array(64);
+const b64encodeTable = new Uint8Array(64);
 
 for (let i = 0; i < 64; i++) {
   const code = b64chars.charCodeAt(i);
@@ -72,79 +96,13 @@ for (let i = 0; i < 64; i++) {
 }
 
 // Return true if byte is 0-9, a-z, A-Z, '-' or '_'
+/** @internal — exported for use by rx-read.ts only */
 export function isB64(byte: number): boolean {
   return b64decodeTable[byte] !== 0xff;
 }
 
-// Encode a number as b64 string
-export function b64Stringify(num: number): string {
-  if (!Number.isSafeInteger(num) || num < 0) {
-    throw new Error(`Cannot stringify ${num} as base64`);
-  }
-  let result = "";
-  while (num > 0) {
-    result = b64chars[num % 64] + result;
-    num = Math.floor(num / 64);
-  }
-  return result;
-}
-
-// Decode a b64 string to a number
-export function b64Parse(str: string): number {
-  let result = 0;
-  for (let i = 0; i < str.length; i++) {
-    const digit = b64decodeTable[str.charCodeAt(i)]!;
-    if (digit === 0xff) {
-      throw new Error(`Invalid base64 character: ${str[i]}`);
-    }
-    result = result * 64 + digit;
-  }
-  return result;
-}
-
-// Read a b64 number from a byte range
-export function b64Read(
-  data: Uint8Array,
-  left: number,
-  right: number,
-): number {
-  let result = 0;
-  for (let i = left; i < right; i++) {
-    const digit = b64decodeTable[data[i]!]!
-    if (digit === 0xff) {
-      throw new Error(`Invalid base64 character code: ${data[i]}`);
-    }
-    result = result * 64 + digit;
-  }
-  return result;
-}
-
-// Return the number of b64 digits needed to encode num
-export function b64Sizeof(num: number): number {
-  if (!Number.isSafeInteger(num) || num < 0) {
-    throw new Error(`Cannot calculate size of ${num} as base64`);
-  }
-  return Math.ceil(Math.log(num + 1) / Math.log(64));
-}
-
-export function b64Write(
-  data: Uint8Array,
-  left: number,
-  right: number,
-  num: number,
-) {
-  let offset = right - 1;
-  while (offset >= left) {
-    data[offset--] = b64encodeTable[num % 64]!;
-    num = Math.floor(num / 64);
-  }
-  if (num > 0) {
-    throw new Error(`Cannot write ${num} as base64`);
-  }
-}
-
 // Encode a signed integer as an unsigned zigzag value
-export function toZigZag(num: number): number {
+function toZigZag(num: number): number {
   if (num >= -0x80000000 && num <= 0x7fffffff) {
     return ((num << 1) ^ (num >> 31)) >>> 0;
   }
@@ -152,6 +110,7 @@ export function toZigZag(num: number): number {
 }
 
 // Decode an unsigned zigzag value back to a signed integer
+/** @internal — exported for use by rx-read.ts only */
 export function fromZigZag(num: number): number {
   if (num <= 0xffffffff) {
     return (num >>> 1) ^ -(num & 1);
@@ -166,19 +125,11 @@ const textDecoder = new TextDecoder();
 
 export type Refs = Record<string, unknown>;
 
-export interface EncodeOptions {
-  /** Stream chunks instead of returning a buffer */
+export interface EncodeOptions extends TuneOptions {
+  /** Stream chunks instead of returning a buffer. */
   onChunk?: (chunk: Uint8Array, offset: number) => void;
-  /** External dictionary of known values (UPPERCASE KEYS) */
+  /** External dictionary of known values (UPPERCASE KEYS). */
   refs?: Refs;
-  /** Override INDEX_THRESHOLD for this encode call. 0 = always index, Infinity = never index. */
-  indexThreshold?: number;
-  /** Override STRING_CHAIN_THRESHOLD. 0 = always split on delimiter, Infinity = never split. */
-  stringChainThreshold?: number;
-  /** Override STRING_CHAIN_DELIMITER. Empty string disables chain splitting. */
-  stringChainDelimiter?: string;
-  /** Override DEDUP_COMPLEXITY_LIMIT. Objects/arrays with recursive node count below this are structurally deduped. 0 = disable. */
-  dedupComplexityLimit?: number;
   /** Buffer chunk size in bytes. Chunks are flushed when full. Default 65536. */
   chunkSize?: number;
 }
@@ -201,7 +152,7 @@ function trimZeroes(str: string): [number, number] {
   return [parseInt(trimmed, 10), str.length - end];
 }
 
-export function splitNumber(val: number): [number, number] {
+function splitNumber(val: number): [number, number] {
   if (Number.isInteger(val)) {
     if (Math.abs(val) < 10) return [val, 0];
     if (Math.abs(val) < 9.999999999999999e20) return trimZeroes(val.toString());
@@ -225,7 +176,7 @@ export function splitNumber(val: number): [number, number] {
 }
 
 // Compare two strings in UTF-8 byte order (code point order preserves UTF-8 ordering)
-export function utf8Sort(a: string, b: string): number {
+function utf8Sort(a: string, b: string): number {
   const len = Math.min(a.length, b.length);
   for (let i = 0; i < len;) {
     const cpA = a.codePointAt(i) ?? 0;
@@ -241,7 +192,7 @@ export function utf8Sort(a: string, b: string): number {
 // Generates a stable cache key for ref lookups.
 // Primitives get a type-tagged string. Objects use JSON.stringify (cached).
 const KeyMap = new WeakMap<object, string>();
-export function makeKey(rootVal: unknown): unknown {
+function makeKey(rootVal: unknown): unknown {
   if (rootVal === null || rootVal === undefined) return String(rootVal);
   switch (typeof rootVal) {
     case "string": return '"' + rootVal;
@@ -284,9 +235,19 @@ export function encode(
 export function encode(value: unknown, options?: EncodeOptions): Uint8Array;
 export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array | undefined {
   const opts = { ...ENCODE_DEFAULTS, ...options };
-  const indexThreshold = opts.indexThreshold ?? INDEX_THRESHOLD;
-  const chainThreshold = opts.stringChainThreshold ?? STRING_CHAIN_THRESHOLD;
-  const chainDelimiter = opts.stringChainDelimiter ?? STRING_CHAIN_DELIMITER;
+  const indexThreshold = opts.indexThreshold ?? tuned.indexThreshold;
+  const chainThreshold = opts.stringChainThreshold ?? tuned.stringChainThreshold;
+  const chainDelimiter = opts.stringChainDelimiter ?? tuned.stringChainDelimiter;
+  const minIndexDepth = opts.minIndexDepth ?? tuned.minIndexDepth;
+  const maxIndexDepth = opts.maxIndexDepth ?? tuned.maxIndexDepth;
+  // Container depth: root container is depth 0, its container children are 1, etc.
+  let depth = 0;
+  // Resolve index decision for a container at depth `d` with body size `bodySize`.
+  // Returns true (force on), false (force off), or applies the byte heuristic.
+  const wantsIndex = (d: number, bodySize: number) =>
+    d < minIndexDepth ? true :
+    d >= maxIndexDepth ? false :
+    bodySize >= indexThreshold;
 
   // Build a fast delimiter lookup set for chain splitting
   const chainDelimSet = new Uint8Array(128);
@@ -305,9 +266,15 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   const seen = new Map<unknown, number>();
   const seenBig = new Map<unknown, number>();
   // Schema trie: nested objects keyed by individual key names, avoids join() allocation.
-  // Terminal nodes store the offset under a Symbol key to avoid conflicts with real keys.
+  // Terminal nodes store metadata under Symbol keys to avoid conflicts with real keys.
+  // SCHEMA_OFFSET: byte position of the inline schema node (set on first encoding).
+  // SCHEMA_COUNT: number of times this shape appears in the input (filled by prescan).
   const SCHEMA_OFFSET: unique symbol = Symbol();
-  type SchemaTrie = { [key: string]: SchemaTrie } & { [SCHEMA_OFFSET]?: number | string };
+  const SCHEMA_COUNT: unique symbol = Symbol();
+  type SchemaTrie = { [key: string]: SchemaTrie } & {
+    [SCHEMA_OFFSET]?: number | string;
+    [SCHEMA_COUNT]?: number;
+  };
   const schemaTrie: SchemaTrie = Object.create(null);
 
   // Traverses the trie, creating nodes as needed, and returns the leaf.
@@ -431,7 +398,7 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   // Pre-scan: mark objects/arrays with complexity below COMPLEXITY_LIMIT as
   // eligible for structural dedup via JSON.stringify. Only simple values are
   // stored in the set — complex values are skipped during encoding.
-  const complexityLimit = opts.dedupComplexityLimit ?? DEDUP_COMPLEXITY_LIMIT;
+  const complexityLimit = opts.dedupComplexityLimit ?? tuned.dedupComplexityLimit;
   const simpleValues = new WeakSet<object>();
 
   (function prescan(val: unknown): number {
@@ -442,6 +409,15 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
       for (let i = 0; i < val.length; i++) c += prescan(val[i]);
     } else {
       const keys = Object.keys(val);
+      // Count shape occurrences for schema sharing — only shapes that appear
+      // more than once will end up using a schema in the main pass.
+      if (keys.length >= 2) {
+        let leaf: SchemaTrie = schemaTrie;
+        for (let i = 0; i < keys.length; i++) {
+          leaf = leaf[keys[i]!] ??= Object.create(null);
+        }
+        leaf[SCHEMA_COUNT] = (leaf[SCHEMA_COUNT] ?? 0) + 1;
+      }
       for (let i = 0; i < keys.length; i++) c += 1 + prescan((val as any)[keys[i]!]);
     }
     if (c < complexityLimit) simpleValues.add(val);
@@ -580,10 +556,11 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
           if (prefixLengths!.has(offset)) {
             const prefix = value.slice(0, offset);
             if (knownPrefixes.has(prefix)) {
-              const before = pos;
+              pushASCII("<");
               writeAny(value.substring(offset));
               writeAny(prefix);
-              return emitUnsigned(TAG_DOT, pos - before);
+              pushASCII(">");
+              return pos;
             }
           }
           // find next delimiter to the left
@@ -654,9 +631,22 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
   }
 
   function writeArray(value: unknown[]) {
-    const start = pos;
-    writeValues(value);
-    return emitUnsigned(TAG_SEMI, pos - start);
+    pushASCII("[");
+    const length = value.length;
+    if (length > 0) {
+      const myDepth = depth;
+      const offsets = new Array<number>(length);
+      const bodyStart = pos;
+      depth = myDepth + 1;
+      for (let i = length - 1; i >= 0; i--) {
+        writeAny(value[i]);
+        offsets[i] = pos;
+      }
+      depth = myDepth;
+      if (wantsIndex(myDepth, pos - bodyStart)) writeIndex(offsets, length);
+    }
+    pushASCII("]");
+    return pos;
   }
 
   // Write a b64-encoded number of exactly `width` digits into buf at `offset`.
@@ -677,100 +667,158 @@ export function encode(rootValue: unknown, options?: EncodeOptions): Uint8Array 
     if (width > 8) throw new Error(`Index width exceeds maximum of 8 characters: ${width}`);
     const totalBytes = count * width;
     ensureCapacity(totalBytes + 16);
+    // Entries are stored in REVERSE natural order so R-to-L scanning yields
+    // them forward — the rightmost entry holds the delta for element 0.
     for (let i = 0; i < count; i++) {
-      writeB64Fixed(buf, off + i * width, pos - offsets[i]!, width);
+      writeB64Fixed(buf, off + i * width, pos - offsets[count - 1 - i]!, width);
     }
     pos += totalBytes;
     off += totalBytes;
     emitUnsigned(TAG_HASH, (count << 3) | (width - 1));
   }
 
-  function writeValues(values: unknown[]) {
-    const length = values.length;
-    if (length > indexThreshold) {
-      const offsets = new Array<number>(length);
-      for (let i = length - 1; i >= 0; i--) {
-        writeAny(values[i]);
-        offsets[i] = pos;
-      }
-      writeIndex(offsets, length);
-    } else {
-      for (let i = length - 1; i >= 0; i--) {
-        writeAny(values[i]);
-      }
-    }
-  }
-
   function writeObject(value: Record<string, unknown>, keys?: string[]) {
     if (!keys) keys = Object.keys(value);
     const length = keys.length;
-    if (length === 0) return pushASCII(":");
-
-    // Inline schemaUpsert: walk/create trie nodes for this key sequence.
-    let schemaLeaf: SchemaTrie = schemaTrie;
-    for (let i = 0; i < length; i++) {
-      const k = keys[i]!;
-      schemaLeaf = schemaLeaf[k] ??= Object.create(null);
+    if (length === 0) {
+      pushASCII("{}");
+      return pos;
     }
-    const schemaTarget = schemaLeaf[SCHEMA_OFFSET];
-    if (schemaTarget !== undefined) return writeSchemaObject(value, schemaTarget, keys);
 
-    const before = pos;
-    const needsIndex = length > indexThreshold;
+    // If this container's depth forces an index (depth < minIndexDepth),
+    // schema-sharing is disallowed because schemas can't carry an index.
+    if (depth < minIndexDepth) {
+      return writePlainObject(value, keys);
+    }
 
-    if (needsIndex) {
-      // Pre-compute sorted order for index: sort key indices by UTF-8 order
+    // Schemas only earn their keep when a shape is shared (count > 1) AND has
+    // 2+ keys (1-key objects don't benefit). 0/1-key objects, singleton shapes,
+    // and shapes whose keys contain the schema delimiter all use inline keys.
+    if (length >= 2) {
+      let hasComma = false;
+      for (let i = 0; i < length; i++) {
+        if (keys[i]!.indexOf(",") !== -1) { hasComma = true; break; }
+      }
+      if (!hasComma) {
+        // Walk the trie to find the prescan-counted leaf for this shape.
+        let schemaLeaf: SchemaTrie = schemaTrie;
+        for (let i = 0; i < length; i++) {
+          schemaLeaf = schemaLeaf[keys[i]!] ??= Object.create(null);
+        }
+        const count = schemaLeaf[SCHEMA_COUNT] ?? 0;
+        if (count > 1) {
+          const schemaTarget = schemaLeaf[SCHEMA_OFFSET];
+          if (schemaTarget !== undefined) {
+            // Subsequent occurrence: emit values + pointer to existing schema node.
+            return writeSchemaSharedObject(value, schemaTarget, keys);
+          }
+          // First occurrence of a shared shape: emit values + inline schema,
+          // record schema right-edge so subsequent occurrences can point at it.
+          const schemaEnd = writeFirstSchemaObject(value, keys);
+          schemaLeaf[SCHEMA_OFFSET] = schemaEnd;
+          return pos;
+        }
+      }
+    }
+
+    return writePlainObject(value, keys);
+  }
+
+  // Object with inline keys. May carry an index for O(log n) key lookup if the
+  // body is large enough to make linear R-to-L scanning expensive, or if the
+  // depth thresholds force one.
+  function writePlainObject(value: Record<string, unknown>, keys: string[]) {
+    pushASCII("{");
+    const length = keys.length;
+
+    const myDepth = depth;
+    // Record key offsets unconditionally; we decide on the index after seeing the body.
+    const keyOffsets = new Array<number>(length);
+    const bodyStart = pos;
+    depth = myDepth + 1;
+    for (let i = length - 1; i >= 0; i--) {
+      const key = keys[i]!;
+      writeAny(value[key]);
+      writeAny(key);
+      keyOffsets[i] = pos;
+    }
+    depth = myDepth;
+
+    if (wantsIndex(myDepth, pos - bodyStart)) {
+      // Sort key indices by UTF-8 order for binary-search lookup.
       const sortedIndices = new Array<number>(length);
       for (let i = 0; i < length; i++) sortedIndices[i] = i;
-      sortedIndices.sort((a, b) => utf8Sort(keys![a]!, keys![b]!));
-
-      // Write entries in reverse insertion order, recording offset per key index
-      const keyOffsets = new Array<number>(length);
-      for (let i = length - 1; i >= 0; i--) {
-        const key = keys[i]!;
-        writeAny(value[key]);
-        writeAny(key);
-        keyOffsets[i] = pos;
-      }
-
-      // Build sorted offsets array for index
+      sortedIndices.sort((a, b) => utf8Sort(keys[a]!, keys[b]!));
       const sortedOffsets = new Array<number>(length);
       for (let i = 0; i < length; i++) {
         sortedOffsets[i] = keyOffsets[sortedIndices[i]!]!;
       }
       writeIndex(sortedOffsets, length);
-    } else {
-      // Small object — no index needed; iterate keys directly (no Object.entries tuple alloc)
-      for (let i = length - 1; i >= 0; i--) {
-        const key = keys[i]!;
-        writeAny(value[key]);
-        writeAny(key);
-      }
     }
 
-    const ret = emitUnsigned(TAG_COLON, pos - before);
-    schemaLeaf[SCHEMA_OFFSET] = pos;
-    return ret;
+    pushASCII("}");
+    return pos;
   }
 
-  function writeSchemaObject(value: Record<string, unknown>, target: string | number, keys: string[]) {
-    const before = pos;
+  // First occurrence of a shape: emit values + inline schema node.
+  // Returns the schema's right-edge (one past its varint), which subsequent
+  // objects of the same shape use as their pointer target.
+  function writeFirstSchemaObject(value: Record<string, unknown>, keys: string[]): number {
+    pushASCII("{");
     const length = keys.length;
-    // Inline writeValues logic to avoid building Object.values() array
-    if (length > indexThreshold) {
-      const offsets = new Array<number>(length);
-      for (let i = length - 1; i >= 0; i--) {
-        writeAny(value[keys[i]!]);
-        offsets[i] = pos;
-      }
-      writeIndex(offsets, length);
-    } else {
-      for (let i = length - 1; i >= 0; i--) {
-        writeAny(value[keys[i]!]);
-      }
+    const myDepth = depth;
+
+    // Schema objects can't carry an index; emit values in reverse natural order.
+    depth = myDepth + 1;
+    for (let i = length - 1; i >= 0; i--) {
+      writeAny(value[keys[i]!]);
     }
-    if (typeof target === "string") pushASCII(`'${target}`);
-    else emitUnsigned(TAG_CARET, pos - target);
-    return emitUnsigned(TAG_COLON, pos - before);
+    depth = myDepth;
+
+    // Schema body: keys joined by ',' in REVERSE natural order so R-to-L
+    // scanning yields keys in natural order alongside R-to-L value parsing.
+    const reversedKeys = new Array<string>(length);
+    for (let i = 0; i < length; i++) reversedKeys[i] = keys[length - 1 - i]!;
+    const schemaText = reversedKeys.join(",");
+    const schemaBody = textEncoder.encode(schemaText);
+    const bodyLen = schemaBody.length;
+
+    ensureCapacity(bodyLen + 16);
+    buf.set(schemaBody, off);
+    pos += bodyLen;
+    off += bodyLen;
+
+    emitUnsigned(TAG_DOT, bodyLen);
+    const schemaEnd = pos;
+
+    pushASCII("}");
+    return schemaEnd;
+  }
+
+  // Subsequent occurrence of a shape: emit values + pointer to existing schema.
+  function writeSchemaSharedObject(
+    value: Record<string, unknown>,
+    schemaPos: string | number,
+    keys: string[],
+  ) {
+    pushASCII("{");
+    const length = keys.length;
+    const myDepth = depth;
+
+    depth = myDepth + 1;
+    for (let i = length - 1; i >= 0; i--) {
+      writeAny(value[keys[i]!]);
+    }
+    depth = myDepth;
+
+    if (typeof schemaPos === "string") {
+      // External ref name (from refs dictionary) — pre-existing fast path.
+      pushASCII(`'${schemaPos}`);
+    } else {
+      emitUnsigned(TAG_CARET, pos - schemaPos);
+    }
+
+    pushASCII("}");
+    return pos;
   }
 }
